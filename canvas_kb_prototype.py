@@ -15,18 +15,51 @@ import re
 import requests
 from pydantic import BaseModel, Field
 
+import subprocess
+from pathlib import Path
+
+
+# --- Orchestrator defaults (hardcoded to avoid extra valves) ---
+ORCH_REPO_ROOT_DEFAULT = "/app/Open_Canvas"     # inside pipelines container
+ORCH_CLI_REL_DEFAULT = "orchestrator/cli.py"    # relative to repo root
+ORCH_PYTHON_DEFAULT = "python"
+ORCH_RUNS_ROOT_DEFAULT = "runs"
+ORCH_DEPTH_LIMIT_DEFAULT = 10
+
+
 logger = logging.getLogger("canvas_kb_bootstrap")
 logging.basicConfig(level=logging.INFO)
 
 
 class Pipeline:
     class Valves(BaseModel):
+        # --- OpenWebUI ---
         OPENWEBUI_BASE_URL: str = Field(default="http://host.docker.internal:3000")
         OPENWEBUI_API_KEY: str = Field(default="")
+
+        # --- Canvas ---
+        CANVAS_API_KEY: str = Field(default="", description="Canvas API token")
+        CANVAS_COURSE_URL: str = Field(
+            default="",
+            description="Full course URL, e.g. https://learn.canvas.net/courses/3376"
+        )
+
+        # --- Model / Behavior ---
         BASE_MODEL_ID: str = Field(default="gpt-4o")
-        KB_PREFIX: str = Field(default="Canvas Course")
-        MODEL_PREFIX: str = Field(default="Canvas Assistant")
+
+        INCLUDE_METADATA: bool = Field(
+            default=True,
+            description="If true, include metadata (type, title, url, etc.) in generated markdown."
+        )
+
+        INCLUDE_CONTENT_TYPES: Optional[List[str]] = Field(
+            default=None,
+            description="If set, only include these Canvas content types (e.g. pages,assignments)."
+        )
+
+        # --- Networking ---
         HTTP_TIMEOUT_SECS: int = Field(default=30)
+
 
     def __init__(self):
         # This is what makes it show up as a "model" in Open WebUI
@@ -36,9 +69,19 @@ class Pipeline:
         self.valves = self.Valves(
             OPENWEBUI_BASE_URL=os.getenv("OPENWEBUI_BASE_URL", "http://host.docker.internal:3000"),
             OPENWEBUI_API_KEY=os.getenv("OPENWEBUI_API_KEY", ""),
+            CANVAS_API_KEY=os.getenv("CANVAS_API_KEY", ""),
+            CANVAS_COURSE_URL=os.getenv("CANVAS_COURSE_URL", ""),
             BASE_MODEL_ID=os.getenv("BASE_MODEL_ID", "gpt-4o"),
+            INCLUDE_METADATA=os.getenv("INCLUDE_METADATA", "true").lower() in ("1", "true", "yes", "y", "on"),
+            # Comma-separated env var support if you want it:
+            INCLUDE_CONTENT_TYPES=(
+                [s.strip() for s in os.getenv("INCLUDE_CONTENT_TYPES", "").split(",") if s.strip()]
+                if os.getenv("INCLUDE_CONTENT_TYPES")
+                else None
+            ),
             HTTP_TIMEOUT_SECS=int(os.getenv("HTTP_TIMEOUT_SECS", "30")),
         )
+
 
     async def on_startup(self):
         logger.info("Pipeline startup: canvas_kb_bootstrap")
@@ -205,6 +248,63 @@ class Pipeline:
             return {"raw": data}
         return data
 
+
+    def run_orchestrator(self, course_url: str) -> dict[str, Any]:
+        repo_root = Path(os.getenv("ORCH_REPO_ROOT", ORCH_REPO_ROOT_DEFAULT))
+        cli_path = repo_root / ORCH_CLI_REL_DEFAULT
+
+        if not cli_path.exists():
+            return {
+                "returncode": 2,
+                "stdout": "",
+                "stderr": f"Orchestrator CLI not found at: {cli_path}\n"
+                        f"Tip: confirm the repo is mounted at {repo_root} inside the pipelines container.",
+                "cmd": "",
+            }
+
+        cmd = [
+            os.getenv("ORCH_PYTHON", ORCH_PYTHON_DEFAULT),
+            str(cli_path),
+            "--course-url", course_url,
+            "--runs-root", ORCH_RUNS_ROOT_DEFAULT,
+            "--depth-limit", str(ORCH_DEPTH_LIMIT_DEFAULT),
+            "--model", self.valves.BASE_MODEL_ID,  # ✅ reuse your existing valve
+            "--run-name", "openwebui",             # optional: predictable run name
+        ]
+
+        # Optional conversion/chunking behavior flags (match your cli.py)
+        # If you want frontmatter by default:
+        cmd.append("--include-frontmatter")
+
+        # If you ever decide to expose include dirs later:
+        # cmd += ["--include", "pages,assignments"]  # example
+
+        env = os.environ.copy()
+
+        # Canvas token for CLI mode
+        if self.valves.CANVAS_API_KEY:
+            env["CANVAS_TOKEN"] = self.valves.CANVAS_API_KEY
+
+        # Optional OpenAI key to enable LLM fallback in conversion
+        # (your cli.py enables LLM only if OPENAI_API_KEY exists)
+        # If you want to drive this from a valve later, wire it here.
+        if os.getenv("OPENAI_API_KEY"):
+            env["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        return {
+            "returncode": proc.returncode,
+            "stdout": (proc.stdout or "")[-4000:],
+            "stderr": (proc.stderr or "")[-4000:],
+            "cmd": " ".join(cmd),
+        }
         
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
         # 1) Open WebUI background: chat title generation
@@ -219,38 +319,64 @@ class Pipeline:
         if user_message and (
             "### Task:" in user_message
             or "<chat_history>" in user_message
-            or len(user_message) > 60  # defensive; your course_id should be short
         ):
             return "Ignored background title/tags request."
 
-        # 4) Optional: require explicit command so normal chat doesn't trigger bootstrap
-        # Expected: "bootstrap 3376" or "/bootstrap 3376"
+        # ✅ 3.5) Preflight validation + warnings
+        if not self.valves.OPENWEBUI_API_KEY:
+            return "Missing OPENWEBUI_API_KEY (set it as a valve or env var)."
+
+        warnings: list[str] = []
+        if not self.valves.CANVAS_COURSE_URL:
+            warnings.append("CANVAS_COURSE_URL is not set (Canvas ingest not enabled yet).")
+        if not self.valves.CANVAS_API_KEY:
+            warnings.append("CANVAS_API_KEY is not set (Canvas ingest not enabled yet).")
+
+        # 4) Require explicit command so normal chat doesn't trigger bootstrap
         m = re.match(r"^\s*/?bootstrap\s+(.+?)\s*$", user_message or "", flags=re.I)
         if not m:
-            return "To run this pipeline, send: `bootstrap <course_id>` (example: `bootstrap 3376`)."
+            return "To run this pipeline, send: `bootstrap <course_url>` (example: `bootstrap https://learn.canvas.net/courses/3376`)."
 
-        course_id = m.group(1).strip()
-        if not course_id:
-            return "Type a course id (any string) to bootstrap KB + upload 2 test files + create a model."
+        course_url = m.group(1).strip()
+        if not course_url:
+            return "Provide a Canvas course URL. Example: `bootstrap https://learn.canvas.net/courses/3376`."
 
-        logger.info("User input course_id=%s", course_id)
+        # 5) Parse course URL => base_url + numeric course_id (more stable IDs/names)
+        try:
+            base_url, course_id = _parse_course_url(course_url)
+        except Exception as e:
+            return f"Invalid Canvas course URL: {e}"
 
+        logger.info("User input course_url=%s (base=%s course_id=%s)", course_url, base_url, course_id)
+
+        # Stable, readable names/ids
         kb_name = f"{self.valves.KB_PREFIX} {course_id}"
         model_name = f"{self.valves.MODEL_PREFIX} {course_id}"
-        model_id_new = f"canvas-assistant-{course_id}".lower().replace(" ", "-").replace("/", "-")
+        model_id_new = f"canvas-assistant-{course_id}"
 
-        # 1) Create KB
+        # 6) Run orchestrator first (engine milestone)
+        # If you haven't added run_orchestrator yet, you can comment this block out.
+        orch = self.run_orchestrator(course_url)
+        if orch.get("returncode", 0) != 0:
+            return (
+                "❌ Orchestrator failed\n\n"
+                f"- cmd: {orch.get('cmd','')}\n\n"
+                f"stdout:\n{orch.get('stdout','')}\n\n"
+                f"stderr:\n{orch.get('stderr','')}"
+            )
+
+        # 7) Create KB
         kb = self.create_knowledge(
             name=kb_name,
-            description=f"Autocreated KB for course {course_id}",
+            description=f"Autocreated KB for course {course_url}",
         )
         kb_id = kb.get("id")
         if not kb_id:
             return f"KB create returned unexpected payload: {kb}"
 
-        # 2) Upload 2 test MD files
-        md1 = f"# Course {course_id}\n\nThis is test file 1 for course {course_id}.\n"
-        md2 = f"# Course {course_id} - Notes\n\nThis is test file 2 for course {course_id}.\n"
+        # 8) Upload 2 test MD files (for now)
+        md1 = f"# Course {course_id}\n\nBase URL: {base_url}\nCourse URL: {course_url}\n\nThis is test file 1.\n"
+        md2 = f"# Course {course_id} - Notes\n\nThis is test file 2.\n"
 
         up1 = self.upload_file_from_bytes(f"{course_id}_test_1.md", md1.encode("utf-8"))
         up2 = self.upload_file_from_bytes(f"{course_id}_test_2.md", md2.encode("utf-8"))
@@ -260,11 +386,11 @@ class Pipeline:
         if not file1_id or not file2_id:
             return f"Upload returned unexpected payloads:\n1={up1}\n2={up2}"
 
-        # 3) Add to KB (no polling)
+        # 9) Add to KB (no polling)
         add1 = self.add_file_to_knowledge(kb_id, file1_id)
         add2 = self.add_file_to_knowledge(kb_id, file2_id)
 
-        # 4) Create model (best-effort attach KB)
+        # 10) Create model (best-effort attach KB)
         created_model = self.create_model(
             model_id=model_id_new,
             name=model_name,
@@ -273,16 +399,22 @@ class Pipeline:
             knowledge_name=kb_name,
         )
 
+        warn_text = ("\n\n⚠️ Warnings:\n- " + "\n- ".join(warnings)) if warnings else ""
 
+        # 11) Success
         return (
             "✅ Prototype complete\n\n"
-            f"- Input: `{course_id}`\n"
+            f"- Input course_url: `{course_url}`\n"
+            f"- Parsed: base=`{base_url}`, course_id=`{course_id}`\n"
+            f"- Orchestrator: ✅ success\n"
             f"- Knowledge Base: `{kb_name}` (id={kb_id})\n"
             f"- Uploaded files: `{file1_id}`, `{file2_id}`\n"
             f"- Added-to-KB responses: {json.dumps({'file1': add1, 'file2': add2})[:400]}\n"
             f"- Model created: `{model_id_new}` (base={self.valves.BASE_MODEL_ID})\n\n"
             "Notes:\n"
-            "• Your OpenWebUI indexes files asynchronously; this pipeline does not wait for processing.\n"
+            "• OpenWebUI indexes files asynchronously; this pipeline does not wait for processing.\n"
             "• If the KB doesn’t show as attached in the model editor, you can manually attach it once in the UI.\n"
             f"• Raw model create response (truncated): {str(created_model)[:400]}"
+            f"{warn_text}"
         )
+
