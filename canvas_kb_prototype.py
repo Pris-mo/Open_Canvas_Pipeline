@@ -11,6 +11,7 @@ import os
 import json
 import logging
 import re
+from urllib.parse import urlparse
 
 import requests
 from pydantic import BaseModel, Field
@@ -20,9 +21,9 @@ from pathlib import Path
 
 
 # --- Orchestrator defaults (hardcoded to avoid extra valves) ---
-ORCH_REPO_ROOT_DEFAULT = "/app/Open_Canvas"     # inside pipelines container
+ORCH_REPO_ROOT_DEFAULT = "/app/pipelines/Open_Canvas"
 ORCH_CLI_REL_DEFAULT = "orchestrator/cli.py"    # relative to repo root
-ORCH_PYTHON_DEFAULT = "python"
+ORCH_PYTHON_DEFAULT = "/app/pipelines/Open_Canvas/.venv/bin/python"
 ORCH_RUNS_ROOT_DEFAULT = "runs"
 ORCH_DEPTH_LIMIT_DEFAULT = 10
 
@@ -30,37 +31,60 @@ ORCH_DEPTH_LIMIT_DEFAULT = 10
 logger = logging.getLogger("canvas_kb_bootstrap")
 logging.basicConfig(level=logging.INFO)
 
+class Valves(BaseModel):
+    OPENWEBUI_BASE_URL: str = Field(default="http://host.docker.internal:3000")
+    OPENWEBUI_API_KEY: str = Field(default="")
+
+    CANVAS_API_KEY: str = Field(default="", description="Canvas API token")
+    OPENAI_API_KEY: str = Field(default="", description="Optional. Enables LLM fallback during conversion/chunking.")
+
+
+    BASE_MODEL_ID: str = Field(default="gpt-4o")
+
+    INCLUDE_METADATA: bool = Field(default=True, description="Include metadata in markdown")
+    INCLUDE_CONTENT_TYPES: Optional[List[str]] = Field(default=None, description="Limit to content types")
+
+    HTTP_TIMEOUT_SECS: int = Field(default=30)
+
+Valves.model_rebuild()
+def _parse_course_url(course_url: str) -> tuple[str, str]:
+    """
+    Accepts:
+      https://learn.canvas.net/courses/3376
+      https://learn.canvas.net/courses/3376/
+      https://learn.canvas.net/courses/3376?foo=bar
+
+    Returns:
+      (base_url, course_id)
+        base_url: https://learn.canvas.net
+        course_id: 3376
+    """
+    u = urlparse(course_url.strip())
+    if not u.scheme or not u.netloc:
+        raise ValueError("URL must include scheme and host (e.g. https://learn.canvas.net/courses/3376)")
+
+    # base URL = scheme + host
+    base_url = f"{u.scheme}://{u.netloc}"
+
+    # extract course id from path
+    # expected path like /courses/<id>
+    m = re.search(r"/courses/([^/]+)", u.path)
+    if not m:
+        raise ValueError("Expected path like /courses/<course_id>")
+
+    course_id = m.group(1).strip()
+    if not course_id:
+        raise ValueError("course_id was empty")
+
+    return base_url, course_id
+
+def _slug(s: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
+    return s[:60]
 
 class Pipeline:
-    class Valves(BaseModel):
-        # --- OpenWebUI ---
-        OPENWEBUI_BASE_URL: str = Field(default="http://host.docker.internal:3000")
-        OPENWEBUI_API_KEY: str = Field(default="")
-
-        # --- Canvas ---
-        CANVAS_API_KEY: str = Field(default="", description="Canvas API token")
-        CANVAS_COURSE_URL: str = Field(
-            default="",
-            description="Full course URL, e.g. https://learn.canvas.net/courses/3376"
-        )
-
-        # --- Model / Behavior ---
-        BASE_MODEL_ID: str = Field(default="gpt-4o")
-
-        INCLUDE_METADATA: bool = Field(
-            default=True,
-            description="If true, include metadata (type, title, url, etc.) in generated markdown."
-        )
-
-        INCLUDE_CONTENT_TYPES: Optional[List[str]] = Field(
-            default=None,
-            description="If set, only include these Canvas content types (e.g. pages,assignments)."
-        )
-
-        # --- Networking ---
-        HTTP_TIMEOUT_SECS: int = Field(default=30)
-
-
+    Valves = Valves
+  
     def __init__(self):
         # This is what makes it show up as a "model" in Open WebUI
         self.name = "Canvas KB Bootstrap (Prototype)"
@@ -70,7 +94,7 @@ class Pipeline:
             OPENWEBUI_BASE_URL=os.getenv("OPENWEBUI_BASE_URL", "http://host.docker.internal:3000"),
             OPENWEBUI_API_KEY=os.getenv("OPENWEBUI_API_KEY", ""),
             CANVAS_API_KEY=os.getenv("CANVAS_API_KEY", ""),
-            CANVAS_COURSE_URL=os.getenv("CANVAS_COURSE_URL", ""),
+            OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),           
             BASE_MODEL_ID=os.getenv("BASE_MODEL_ID", "gpt-4o"),
             INCLUDE_METADATA=os.getenv("INCLUDE_METADATA", "true").lower() in ("1", "true", "yes", "y", "on"),
             # Comma-separated env var support if you want it:
@@ -262,15 +286,44 @@ class Pipeline:
                 "cmd": "",
             }
 
+        
+        orch_py = os.getenv("ORCH_PYTHON", ORCH_PYTHON_DEFAULT)
+
+        if not Path(orch_py).exists():
+            return {
+                "returncode": 2,
+                "stdout": "",
+                "stderr": (
+                    "❌ Orchestrator environment not ready.\n\n"
+                    "Expected venv python at:\n"
+                    f"  {orch_py}\n\n"
+                    "Fix:\n"
+                    "  Ensure the venv exists and deps are installed, e.g.:\n"
+                    "  /app/pipelines/Open_Canvas/scripts/install_venv_deps.sh\n\n"
+                    "Debug:\n"
+                    "  ls -la /app/pipelines/Open_Canvas/.venv/bin/python"
+                ),
+                "cmd": "",
+            }
+
         cmd = [
-            os.getenv("ORCH_PYTHON", ORCH_PYTHON_DEFAULT),
-            str(cli_path),
+            orch_py,
+            "-m", "orchestrator.cli",
             "--course-url", course_url,
             "--runs-root", ORCH_RUNS_ROOT_DEFAULT,
             "--depth-limit", str(ORCH_DEPTH_LIMIT_DEFAULT),
-            "--model", self.valves.BASE_MODEL_ID,  # ✅ reuse your existing valve
-            "--run-name", "openwebui",             # optional: predictable run name
+            "--model", self.valves.BASE_MODEL_ID,
+            "--run-name", "openwebui",
+            "--include-frontmatter",
         ]
+
+        if self.valves.CANVAS_API_KEY:
+            cmd += ["--canvas-token", self.valves.CANVAS_API_KEY]
+
+        if self.valves.OPENAI_API_KEY:
+            # if your cli supports it; otherwise only env var matters
+            os.environ["OPENAI_API_KEY"] = self.valves.OPENAI_API_KEY
+
 
         # Optional conversion/chunking behavior flags (match your cli.py)
         # If you want frontmatter by default:
@@ -288,8 +341,9 @@ class Pipeline:
         # Optional OpenAI key to enable LLM fallback in conversion
         # (your cli.py enables LLM only if OPENAI_API_KEY exists)
         # If you want to drive this from a valve later, wire it here.
-        if os.getenv("OPENAI_API_KEY"):
-            env["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+        if self.valves.OPENAI_API_KEY:
+            env["OPENAI_API_KEY"] = self.valves.OPENAI_API_KEY
+
 
         proc = subprocess.run(
             cmd,
@@ -305,6 +359,8 @@ class Pipeline:
             "stderr": (proc.stderr or "")[-4000:],
             "cmd": " ".join(cmd),
         }
+        
+
         
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
         # 1) Open WebUI background: chat title generation
@@ -327,8 +383,6 @@ class Pipeline:
             return "Missing OPENWEBUI_API_KEY (set it as a valve or env var)."
 
         warnings: list[str] = []
-        if not self.valves.CANVAS_COURSE_URL:
-            warnings.append("CANVAS_COURSE_URL is not set (Canvas ingest not enabled yet).")
         if not self.valves.CANVAS_API_KEY:
             warnings.append("CANVAS_API_KEY is not set (Canvas ingest not enabled yet).")
 
@@ -349,11 +403,6 @@ class Pipeline:
 
         logger.info("User input course_url=%s (base=%s course_id=%s)", course_url, base_url, course_id)
 
-        # Stable, readable names/ids
-        kb_name = f"{self.valves.KB_PREFIX} {course_id}"
-        model_name = f"{self.valves.MODEL_PREFIX} {course_id}"
-        model_id_new = f"canvas-assistant-{course_id}"
-
         # 6) Run orchestrator first (engine milestone)
         # If you haven't added run_orchestrator yet, you can comment this block out.
         orch = self.run_orchestrator(course_url)
@@ -364,6 +413,15 @@ class Pipeline:
                 f"stdout:\n{orch.get('stdout','')}\n\n"
                 f"stderr:\n{orch.get('stderr','')}"
             )
+        
+        u = urlparse(course_url)
+        host = u.netloc or "canvas"
+        host_slug = _slug(host)
+        course_slug = _slug(course_id)
+
+        kb_name = f"{host} course {course_id}"
+        model_name = f"{host} assistant {course_id}"
+        model_id_new = f"canvas-{host_slug}-{course_slug}"
 
         # 7) Create KB
         kb = self.create_knowledge(
