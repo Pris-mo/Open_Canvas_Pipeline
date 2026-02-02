@@ -19,6 +19,10 @@ from pydantic import BaseModel, Field
 import subprocess
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# better: 8-char uuid
+import uuid
 
 # --- Orchestrator defaults (hardcoded to avoid extra valves) ---
 ORCH_REPO_ROOT_DEFAULT = "/app/pipelines/Open_Canvas"
@@ -26,6 +30,10 @@ ORCH_CLI_REL_DEFAULT = "orchestrator/cli.py"    # relative to repo root
 ORCH_PYTHON_DEFAULT = "/app/pipelines/Open_Canvas/.venv/bin/python"
 ORCH_RUNS_ROOT_DEFAULT = "runs"
 ORCH_DEPTH_LIMIT_DEFAULT = 10
+ORCH_CHUNKS_DIR_DEFAULT = "runs/openwebui/chunker/chunks" 
+UPLOAD_WORKERS_DEFAULT = 4
+FILE_PROCESS_DEFAULT = True
+FILE_PROCESS_IN_BACKGROUND_DEFAULT = True
 
 
 logger = logging.getLogger("canvas_kb_bootstrap")
@@ -82,6 +90,8 @@ def _slug(s: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
     return s[:60]
 
+
+
 class Pipeline:
     Valves = Valves
   
@@ -121,6 +131,52 @@ class Pipeline:
             "Authorization": f"Bearer {self.valves.OPENWEBUI_API_KEY}",
             "Accept": "application/json",
         }
+
+    def _iter_markdown_files(self, chunks_root: Path) -> List[Path]:
+        """Return all .md files under chunks_root recursively, sorted for stability."""
+        if not chunks_root.exists():
+            return []
+        files = [p for p in chunks_root.rglob("*.md") if p.is_file()]
+        files.sort()
+        return files
+
+    def _safe_upload_name(self, root: Path, path: Path) -> str:
+        """
+        Turn a file path into a stable filename for OpenWebUI uploads.
+        Preserves subfolder structure by encoding it into the filename.
+        """
+        rel = path.relative_to(root).as_posix()
+        # Avoid weird chars; keep it readable
+        rel = re.sub(r"[^a-zA-Z0-9/_\.\-]+", "_", rel)
+        return rel.replace("/", "__")  # "unit1/chunk_001.md" -> "unit1__chunk_001.md"
+
+    def _upload_and_attach_one(
+        self,
+        kb_id: str,
+        chunks_root: Path,
+        md_path: Path,
+    ) -> tuple[str, Optional[str], Optional[str]]:
+        """
+        Returns: (md_path_str, file_id_or_none, error_or_none)
+        """
+        try:
+            up = self.upload_markdown_file(chunks_root, md_path)
+            file_id = up.get("id") or (up.get("file") or {}).get("id")
+            if not file_id:
+                raise RuntimeError(f"Unexpected upload payload: {up}")
+
+            self.add_file_to_knowledge(kb_id, file_id)
+            return (str(md_path), file_id, None)
+
+        except Exception as e:
+            return (str(md_path), None, str(e))
+
+
+    def upload_markdown_file(self, chunks_root: Path, md_path: Path) -> Dict[str, Any]:
+        name = self._safe_upload_name(chunks_root, md_path)
+        content = md_path.read_bytes()
+        return self.upload_file_from_bytes(name, content)
+
 
     def _url(self, path: str) -> str:
         # path should start with "/"
@@ -183,11 +239,18 @@ class Pipeline:
 
     def upload_file_from_bytes(self, filename: str, content_bytes: bytes) -> Dict[str, Any]:
         files = {"file": (filename, content_bytes, "text/markdown")}
-        resp = self._http("POST", "/api/v1/files/", files=files)
+
+        params = {
+            "process": "true" if FILE_PROCESS_DEFAULT else "false",
+            "process_in_background": "true" if FILE_PROCESS_IN_BACKGROUND_DEFAULT else "false",
+        }
+
+        resp = self._http("POST", "/api/v1/files/", files=files, params=params)
         data = self._require_ok(resp, "upload_file")
         if not isinstance(data, dict):
             raise RuntimeError(f"upload_file returned unexpected payload: {data}")
         return data
+
 
     def add_file_to_knowledge(self, knowledge_id: str, file_id: str) -> Dict[str, Any]:
         payload = {"file_id": file_id}
@@ -244,6 +307,17 @@ class Pipeline:
             "meta": {
                 "description": "Prototype model created by Canvas KB Bootstrap pipeline.",
                 "suggestion_prompts": [],
+                "capabilities": {
+                    "file_context": "true",
+                    "vision": "true",
+                    "file_upload": "true",
+                    "web_search": "true",
+                    "image_generation": "true",
+                    "code_interpreter": "true",
+                    "citations": "true",
+                    "status_updates": "true",
+                    "builtin_tools": "true"
+                    }, 
             },
             "access_control": None,
         }
@@ -259,11 +333,12 @@ class Pipeline:
                 # Fallback: at least provide id + name so UI doesn't show "undefined"
                 kb_obj = {"id": knowledge_id, "name": knowledge_name or "Knowledge Base"}
 
+            if isinstance(kb_obj, dict) and kb_obj.get("type") != "collection":
+                kb_obj["type"] = "collection"
+
             # This matches what your working model payload looks like (meta.knowledge = [{...}])
             payload["meta"]["knowledge"] = [kb_obj]
 
-            # Some builds also read a top-level "knowledge" field; harmless to include.
-            payload["knowledge"] = [kb_obj]
 
 
         resp = self._http("POST", "/api/v1/models/create", json=payload)
@@ -421,7 +496,11 @@ class Pipeline:
 
         kb_name = f"{host} course {course_id}"
         model_name = f"{host} assistant {course_id}"
-        model_id_new = f"canvas-{host_slug}-{course_slug}"
+        run_suffix = os.getenv("MODEL_SUFFIX") or f"{os.getpid()}"
+        run_suffix = uuid.uuid4().hex[:8]
+
+        model_id_new = f"canvas-{host_slug}-{course_slug}-{run_suffix}"
+
 
         # 7) Create KB
         kb = self.create_knowledge(
@@ -432,21 +511,57 @@ class Pipeline:
         if not kb_id:
             return f"KB create returned unexpected payload: {kb}"
 
-        # 8) Upload 2 test MD files (for now)
-        md1 = f"# Course {course_id}\n\nBase URL: {base_url}\nCourse URL: {course_url}\n\nThis is test file 1.\n"
-        md2 = f"# Course {course_id} - Notes\n\nThis is test file 2.\n"
+        # 8) Upload chunked Markdown files produced by orchestrator
+        repo_root = Path(os.getenv("ORCH_REPO_ROOT", ORCH_REPO_ROOT_DEFAULT))
+        chunks_dir = repo_root / ORCH_CHUNKS_DIR_DEFAULT
 
-        up1 = self.upload_file_from_bytes(f"{course_id}_test_1.md", md1.encode("utf-8"))
-        up2 = self.upload_file_from_bytes(f"{course_id}_test_2.md", md2.encode("utf-8"))
+        md_files = self._iter_markdown_files(chunks_dir)
+        if not md_files:
+            return (
+                "❌ Orchestrator succeeded, but no chunk .md files were found.\n\n"
+                f"Expected chunks under:\n  {chunks_dir}\n\n"
+                "Next steps:\n"
+                "• Confirm chunker is enabled in the orchestrator run\n"
+                "• Check the orchestrator logs for where chunks were written"
+            )
 
-        file1_id = up1.get("id") or (up1.get("file") or {}).get("id")
-        file2_id = up2.get("id") or (up2.get("file") or {}).get("id")
-        if not file1_id or not file2_id:
-            return f"Upload returned unexpected payloads:\n1={up1}\n2={up2}"
+        uploaded_file_ids: List[str] = []
+        upload_failures: List[str] = []
 
-        # 9) Add to KB (no polling)
-        add1 = self.add_file_to_knowledge(kb_id, file1_id)
-        add2 = self.add_file_to_knowledge(kb_id, file2_id)
+        workers = UPLOAD_WORKERS_DEFAULT
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {
+                ex.submit(self._upload_and_attach_one, kb_id, chunks_dir, p): p
+                for p in md_files
+            }
+
+            for fut in as_completed(futures):
+                p = futures[fut]
+                try:
+                    path_str, file_id, err = fut.result()
+                    if file_id:
+                        uploaded_file_ids.append(file_id)
+                    else:
+                        upload_failures.append(f"{path_str} -> {err or 'upload/add returned no file id'}")
+                except Exception as e:
+                    upload_failures.append(f"{p} -> {e}")
+
+
+        # If some failed, report (but still proceed if some succeeded)
+        if not uploaded_file_ids:
+            return (
+                "❌ No chunk files were uploaded successfully.\n\n"
+                "Failures:\n- " + "\n- ".join(upload_failures[:20]) +
+                ("\n\n(Only first 20 shown)" if len(upload_failures) > 20 else "")
+            )
+
+        # Optional warning if partial failure
+        if upload_failures:
+            warnings.append(
+                f"{len(upload_failures)} chunk files failed to upload (uploaded {len(uploaded_file_ids)})."
+            )
+
 
         # 10) Create model (best-effort attach KB)
         created_model = self.create_model(
@@ -466,8 +581,7 @@ class Pipeline:
             f"- Parsed: base=`{base_url}`, course_id=`{course_id}`\n"
             f"- Orchestrator: ✅ success\n"
             f"- Knowledge Base: `{kb_name}` (id={kb_id})\n"
-            f"- Uploaded files: `{file1_id}`, `{file2_id}`\n"
-            f"- Added-to-KB responses: {json.dumps({'file1': add1, 'file2': add2})[:400]}\n"
+            f"- Uploaded chunk files: {len(uploaded_file_ids)}\n"
             f"- Model created: `{model_id_new}` (base={self.valves.BASE_MODEL_ID})\n\n"
             "Notes:\n"
             "• OpenWebUI indexes files asynchronously; this pipeline does not wait for processing.\n"
