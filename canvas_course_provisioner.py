@@ -1,11 +1,13 @@
 """
-title: canvas_kb_prototype
-description: Creates a Knowledge Base, uploads 2 test markdown files, adds them to that KB, and (best-effort) creates a custom model bound to that KB.
+title: canvas_course_provisioner
+description: Provisions a Canvas course assistant in Open WebUI by running the orchestrator, creating a Knowledge Base from produced chunks, and creating a model bound to that KB.
 requirements: requests,pydantic
 """
 
+
 from __future__ import annotations
 
+import shutil
 from typing import List, Union, Generator, Iterator, Dict, Any, Optional
 import os
 import json
@@ -36,7 +38,7 @@ FILE_PROCESS_DEFAULT = True
 FILE_PROCESS_IN_BACKGROUND_DEFAULT = True
 
 
-logger = logging.getLogger("canvas_kb_bootstrap")
+logger = logging.getLogger("canvas_course_provisioner")
 logging.basicConfig(level=logging.INFO)
 
 class Valves(BaseModel):
@@ -97,7 +99,7 @@ class Pipeline:
   
     def __init__(self):
         # This is what makes it show up as a "model" in Open WebUI
-        self.name = "Canvas KB Bootstrap (Prototype)"
+        self.name = "Canvas Course Provisioner"
 
         # Load defaults from env, but primarily use valves in the UI
         self.valves = self.Valves(
@@ -118,10 +120,10 @@ class Pipeline:
 
 
     async def on_startup(self):
-        logger.info("Pipeline startup: canvas_kb_bootstrap")
+        logger.info("Pipeline startup: canvas_course_provisioner")
 
     async def on_shutdown(self):
-        logger.info("Pipeline shutdown: canvas_kb_bootstrap")
+        logger.info("Pipeline shutdown: canvas_course_provisioner")
 
     # ----------------------------
     # Open WebUI API helpers
@@ -221,6 +223,56 @@ class Pipeline:
 
         return None
 
+    def _is_model_id_conflict(self, err: Exception) -> bool:
+        """
+        Return True if the error looks like OpenWebUI's 'model id already registered' conflict.
+        We keep this intentionally fuzzy because the exact payload varies by version.
+        """
+        s = str(err).lower()
+        return ("already registered" in s) or ("model id is already registered" in s) or ("conflict" in s and "model" in s)
+
+    def create_model_stable_first(
+        self,
+        stable_model_id: str,
+        name: str,
+        base_model_id: str,
+        knowledge_id: Optional[str],
+        knowledge_name: Optional[str],
+    ) -> tuple[str, Dict[str, Any]]:
+        """
+        Try creating the model with a stable ID first.
+        If it already exists, retry once with a unique suffix.
+
+        Returns: (created_model_id, create_model_response)
+        """
+        try:
+            resp = self.create_model(
+                model_id=stable_model_id,
+                name=name,
+                base_model_id=base_model_id,
+                knowledge_id=knowledge_id,
+                knowledge_name=knowledge_name,
+            )
+            return stable_model_id, resp
+
+        except Exception as e:
+            if not self._is_model_id_conflict(e):
+                raise  # real failure, bubble up
+
+            suffix = uuid.uuid4().hex[:8]
+            retry_id = f"{stable_model_id}-{suffix}"
+            logger.info("Model id conflict for %s; retrying with %s", stable_model_id, retry_id)
+
+            resp = self.create_model(
+                model_id=retry_id,
+                name=name,
+                base_model_id=base_model_id,
+                knowledge_id=knowledge_id,
+                knowledge_name=knowledge_name,
+            )
+            return retry_id, resp
+
+
     # ----------------------------
     # Knowledge flow
     # ----------------------------
@@ -286,7 +338,7 @@ class Pipeline:
 
 
     # ----------------------------
-    # Model flow (best-effort)
+    # Model flow
     # ----------------------------
     def create_model(
         self,
@@ -305,7 +357,7 @@ class Pipeline:
                 "system": self.default_system_prompt(),
             },
             "meta": {
-                "description": "Prototype model created by Canvas KB Bootstrap pipeline.",
+                "description": "Course assistant model created by Canvas Course Provisioner.",
                 "suggestion_prompts": [],
                 "capabilities": {
                     "file_context": "true",
@@ -324,7 +376,7 @@ class Pipeline:
 
 
         # Some builds expect "knowledge" at top-level meta as an array of KB objects
-        # Best-effort attach KB in the shape the UI expects.
+        # Attach KB in the shape the UI expects.
         if knowledge_id:
             # Prefer the full KB object so UI can render name/description.
             try:
@@ -381,6 +433,14 @@ class Pipeline:
                 "cmd": "",
             }
 
+        runs_root = repo_root / ORCH_RUNS_ROOT_DEFAULT      
+        run_dir = runs_root / "openwebui"  # matches --run-name openwebui
+        
+        # Recreate runs/openwebui each run
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True) 
+
         cmd = [
             orch_py,
             "-m", "orchestrator.cli",
@@ -398,11 +458,6 @@ class Pipeline:
         if self.valves.OPENAI_API_KEY:
             # if your cli supports it; otherwise only env var matters
             os.environ["OPENAI_API_KEY"] = self.valves.OPENAI_API_KEY
-
-
-        # Optional conversion/chunking behavior flags (match your cli.py)
-        # If you want frontmatter by default:
-        cmd.append("--include-frontmatter")
 
         # If you ever decide to expose include dirs later:
         # cmd += ["--include", "pages,assignments"]  # example
@@ -440,7 +495,7 @@ class Pipeline:
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
         # 1) Open WebUI background: chat title generation
         if body.get("title"):
-            return "🧱 Canvas KB Bootstrap"
+            return "🧱 Canvas Course Provisioner"
 
         # 2) Open WebUI background: chat tags generation
         if body.get("tags"):
@@ -461,14 +516,14 @@ class Pipeline:
         if not self.valves.CANVAS_API_KEY:
             warnings.append("CANVAS_API_KEY is not set (Canvas ingest not enabled yet).")
 
-        # 4) Require explicit command so normal chat doesn't trigger bootstrap
-        m = re.match(r"^\s*/?bootstrap\s+(.+?)\s*$", user_message or "", flags=re.I)
+        # 4) Require explicit command so normal chat doesn't trigger provision
+        m = re.match(r"^\s*/?provision\s+(.+?)\s*$", user_message or "", flags=re.I)
         if not m:
-            return "To run this pipeline, send: `bootstrap <course_url>` (example: `bootstrap https://learn.canvas.net/courses/3376`)."
+            return "To run this pipeline, send: `provision <course_url>` (example: `provision https://learn.canvas.net/courses/3376`)."
 
         course_url = m.group(1).strip()
         if not course_url:
-            return "Provide a Canvas course URL. Example: `bootstrap https://learn.canvas.net/courses/3376`."
+            return "Provide a Canvas course URL. Example: `provision https://learn.canvas.net/courses/3376`."
 
         # 5) Parse course URL => base_url + numeric course_id (more stable IDs/names)
         try:
@@ -494,12 +549,10 @@ class Pipeline:
         host_slug = _slug(host)
         course_slug = _slug(course_id)
 
-        kb_name = f"{host} course {course_id}"
-        model_name = f"{host} assistant {course_id}"
-        run_suffix = os.getenv("MODEL_SUFFIX") or f"{os.getpid()}"
-        run_suffix = uuid.uuid4().hex[:8]
+        kb_name = f"canvas:{host}:{course_id}"
 
-        model_id_new = f"canvas-{host_slug}-{course_slug}-{run_suffix}"
+        model_name = f"canvas-{host}-{course_id}"
+        stable_model_id = f"canvas-{host_slug}-{course_slug}"
 
 
         # 7) Create KB
@@ -562,27 +615,26 @@ class Pipeline:
                 f"{len(upload_failures)} chunk files failed to upload (uploaded {len(uploaded_file_ids)})."
             )
 
-
-        # 10) Create model (best-effort attach KB)
-        created_model = self.create_model(
-            model_id=model_id_new,
+        created_id, created_model = self.create_model_stable_first(
+            stable_model_id=stable_model_id,
             name=model_name,
             base_model_id=self.valves.BASE_MODEL_ID,
             knowledge_id=kb_id,
             knowledge_name=kb_name,
         )
 
+
         warn_text = ("\n\n⚠️ Warnings:\n- " + "\n- ".join(warnings)) if warnings else ""
 
         # 11) Success
         return (
-            "✅ Prototype complete\n\n"
+            "Provisioning complete\n\n"
             f"- Input course_url: `{course_url}`\n"
             f"- Parsed: base=`{base_url}`, course_id=`{course_id}`\n"
             f"- Orchestrator: ✅ success\n"
             f"- Knowledge Base: `{kb_name}` (id={kb_id})\n"
             f"- Uploaded chunk files: {len(uploaded_file_ids)}\n"
-            f"- Model created: `{model_id_new}` (base={self.valves.BASE_MODEL_ID})\n\n"
+            f"- Model created: `{created_id}` (base={self.valves.BASE_MODEL_ID})\n\n"
             "Notes:\n"
             "• OpenWebUI indexes files asynchronously; this pipeline does not wait for processing.\n"
             "• If the KB doesn’t show as attached in the model editor, you can manually attach it once in the UI.\n"
