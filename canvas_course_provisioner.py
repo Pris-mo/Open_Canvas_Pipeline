@@ -173,6 +173,27 @@ class Pipeline:
         except Exception as e:
             return (str(md_path), None, str(e))
 
+    def _stream_process_lines(self, cmd: list[str], cwd: Path, env: dict[str, str]):
+        """
+        Yields lines from stdout/stderr while the process runs.
+        """
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,   # merge stderr into stdout
+            text=True,
+            bufsize=1,                  # line-buffered
+            universal_newlines=True,
+        )
+
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            yield line.rstrip("\n")
+
+        rc = proc.wait()
+        return rc
 
     def upload_markdown_file(self, chunks_root: Path, md_path: Path) -> Dict[str, Any]:
         name = self._safe_upload_name(chunks_root, md_path)
@@ -399,6 +420,77 @@ class Pipeline:
             return {"raw": data}
         return data
 
+    def run_orchestrator_stream(self, course_url: str):
+        repo_root = Path(os.getenv("ORCH_REPO_ROOT", ORCH_REPO_ROOT_DEFAULT))
+        cli_path = repo_root / ORCH_CLI_REL_DEFAULT
+
+        if not cli_path.exists():
+            yield f"❌ Orchestrator CLI not found at: {cli_path}"
+            yield {"type": "final", "returncode": 2}
+            return
+
+        orch_py = os.getenv("ORCH_PYTHON", ORCH_PYTHON_DEFAULT)
+        if not Path(orch_py).exists():
+            yield f"❌ Orchestrator python not found: {orch_py}"
+            yield {"type": "final", "returncode": 2}
+            return
+    
+
+        runs_root = repo_root / ORCH_RUNS_ROOT_DEFAULT      
+        run_dir = runs_root / "openwebui"  # matches --run-name openwebui
+        
+        # Recreate runs/openwebui each run
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True) 
+
+        cmd = [
+            orch_py,
+            "-u",
+            "-m", "orchestrator.cli",
+            "--course-url", course_url,
+            "--runs-root", ORCH_RUNS_ROOT_DEFAULT,
+            "--depth-limit", str(ORCH_DEPTH_LIMIT_DEFAULT),
+            "--model", self.valves.BASE_MODEL_ID,
+            "--run-name", "openwebui",
+            "--include-frontmatter",
+        ]
+
+        if self.valves.CANVAS_API_KEY:
+            cmd += ["--canvas-token", self.valves.CANVAS_API_KEY]
+
+        env = os.environ.copy()
+        if self.valves.CANVAS_API_KEY:
+            env["CANVAS_TOKEN"] = self.valves.CANVAS_API_KEY
+        if self.valves.OPENAI_API_KEY:
+            env["OPENAI_API_KEY"] = self.valves.OPENAI_API_KEY
+
+        # Stream lines
+        rc = 0
+        try:
+            gen = self._stream_process_lines(cmd, cwd=repo_root, env=env)
+            while True:
+                try:
+                    line = next(gen)
+                    if "::STEP::" in line:
+                        yield line.strip()
+                except StopIteration as e:
+                    rc = e.value if e.value is not None else 0
+                    break
+        except Exception as e:
+            yield f"❌ Orchestrator exception: {e}"
+            yield {"type": "final", "returncode": 2}
+            return
+
+        if rc != 0:
+            yield f"❌ Orchestrator failed (exit {rc})"
+            yield {"type": "final", "returncode": rc}
+            return
+
+        yield "✅ Orchestrator finished successfully."
+        yield {"type": "final", "returncode": 0}
+        return
+
 
     def run_orchestrator(self, course_url: str) -> dict[str, Any]:
         repo_root = Path(os.getenv("ORCH_REPO_ROOT", ORCH_REPO_ROOT_DEFAULT))
@@ -443,6 +535,7 @@ class Pipeline:
 
         cmd = [
             orch_py,
+            "-u",
             "-m", "orchestrator.cli",
             "--course-url", course_url,
             "--runs-root", ORCH_RUNS_ROOT_DEFAULT,
@@ -535,14 +628,17 @@ class Pipeline:
 
         # 6) Run orchestrator first (engine milestone)
         # If you haven't added run_orchestrator yet, you can comment this block out.
-        orch = self.run_orchestrator(course_url)
-        if orch.get("returncode", 0) != 0:
-            return (
-                "❌ Orchestrator failed\n\n"
-                f"- cmd: {orch.get('cmd','')}\n\n"
-                f"stdout:\n{orch.get('stdout','')}\n\n"
-                f"stderr:\n{orch.get('stderr','')}"
-            )
+        orch_rc = None
+        for item in self.run_orchestrator_stream(course_url):
+            if isinstance(item, dict) and item.get("type") == "final":
+                orch_rc = item.get("returncode", 2)
+            else:
+                yield str(item)
+
+        if orch_rc != 0:
+            return "❌ Orchestrator failed"
+        if orch_rc is None:
+            return "❌ Orchestrator ended without final status"
         
         u = urlparse(course_url)
         host = u.netloc or "canvas"
