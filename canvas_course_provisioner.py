@@ -473,7 +473,8 @@ class Pipeline:
                 try:
                     line = next(gen)
                     if "::STEP::" in line:
-                        yield line.strip()
+                        clean = line.strip().replace("::STEP::", "- ", 1)
+                        yield f"{clean}\n"
                 except StopIteration as e:
                     rc = e.value if e.value is not None else 0
                     break
