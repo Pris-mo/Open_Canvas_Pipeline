@@ -1,7 +1,7 @@
 """
 title: canvas_course_provisioner
 description: Provisions a Canvas course assistant in Open WebUI by running the orchestrator, creating a Knowledge Base from produced chunks, and creating a model bound to that KB.
-requirements: requests,pydantic
+requirements:requests,pydantic,open-canvas @ git+https://github.com/Pris-mo/Open_Canvas.git@OpenWeb-Packaging
 """
 
 
@@ -14,6 +14,7 @@ import json
 import logging
 import re
 from urllib.parse import urlparse
+import sys
 
 import requests
 from pydantic import BaseModel, Field
@@ -27,15 +28,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import uuid
 
 # --- Orchestrator defaults (hardcoded to avoid extra valves) ---
-ORCH_REPO_ROOT_DEFAULT = "/app/pipelines/Open_Canvas"
-ORCH_CLI_REL_DEFAULT = "orchestrator/cli.py"    # relative to repo root
-ORCH_PYTHON_DEFAULT = "/app/pipelines/Open_Canvas/.venv/bin/python"
-ORCH_RUNS_ROOT_DEFAULT = "runs"
+PIPELINE_ROOT = Path(__file__).resolve().parent
+ORCH_RUNS_ROOT_DEFAULT = str(PIPELINE_ROOT / "runs")  # e.g. /app/pipelines/Open_Canvas_Pipeline/runs
 ORCH_DEPTH_LIMIT_DEFAULT = 10
-ORCH_CHUNKS_DIR_DEFAULT = "runs/openwebui/chunker/chunks" 
 UPLOAD_WORKERS_DEFAULT = 4
 FILE_PROCESS_DEFAULT = True
 FILE_PROCESS_IN_BACKGROUND_DEFAULT = True
+
 
 
 logger = logging.getLogger("canvas_course_provisioner")
@@ -49,7 +48,7 @@ class Valves(BaseModel):
     OPENAI_API_KEY: str = Field(default="", description="Optional. Enables LLM fallback during conversion/chunking.")
 
 
-    BASE_MODEL_ID: str = Field(default="gpt-4o")
+    BASE_MODEL_ID: str = Field(default="gpt-5")
 
     INCLUDE_METADATA: bool = Field(default=True, description="Include metadata in markdown")
     INCLUDE_CONTENT_TYPES: Optional[List[str]] = Field(default=None, description="Limit to content types")
@@ -107,7 +106,7 @@ class Pipeline:
             OPENWEBUI_API_KEY=os.getenv("OPENWEBUI_API_KEY", ""),
             CANVAS_API_KEY=os.getenv("CANVAS_API_KEY", ""),
             OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),           
-            BASE_MODEL_ID=os.getenv("BASE_MODEL_ID", "gpt-4o"),
+            BASE_MODEL_ID=os.getenv("BASE_MODEL_ID", "gpt-5"),
             INCLUDE_METADATA=os.getenv("INCLUDE_METADATA", "true").lower() in ("1", "true", "yes", "y", "on"),
             # Comma-separated env var support if you want it:
             INCLUDE_CONTENT_TYPES=(
@@ -342,18 +341,77 @@ class Pipeline:
         return f"""
             You are a helpful, retrieval-augmented assistant for a Canvas course.
 
-            Your goals:
+            PRIMARY GOALS
             - Prefer answers grounded in retrieved course materials.
-            - When using course content, cite it clearly and link to the Canvas page when available.
+            - When using course content, clearly cite it and hyperlink to the Canvas resource when available.
             - If information is missing or ambiguous, ask a clarifying question rather than guessing.
             - Be concise, friendly, and student-focused.
 
-            Guidelines:
+            -------------------------------------
+
+            ACADEMIC INTEGRITY & COURSE GUIDELINES
             - Do not invent policies, deadlines, or requirements.
             - If asked for answers to graded assessments, provide guidance and explanations instead of direct answers.
-            - When relevant, suggest where in Canvas the student can find the information (e.g., Modules → Week 3).
+            - When relevant, suggest where in Canvas the student can find information (e.g., Modules → Week 3).
+            - Use retrieved metadata (title, type, url, etc.) to improve clarity and accuracy when referencing resources.
 
-            If no relevant knowledge is retrieved, say so explicitly and explain what information would help.
+            -------------------------------------
+
+            HYPERLINKING RULES
+            When relevant Canvas resources exist:
+
+            - Include hyperlinks ONLY at the END of your response under a section titled:
+
+            Relevant Course Resources:
+
+            - Include a maximum of 3 links.
+            - Include ONLY the most helpful and directly related resources.
+            - Prefer graded or required content over optional materials.
+            - Prefer assignments, quizzes, modules, pages, or files.
+            - Do NOT include duplicate or low-value links.
+
+            LINK FORMAT REQUIREMENTS
+            - Links MUST use Markdown hyperlink syntax:
+            [Resource Title](URL)
+
+            - Use descriptive titles instead of raw URLs.
+            - Never display raw URLs.
+            - Never place URLs in parentheses after text.
+            - Never add commentary on the same line as a hyperlink.
+
+            If more than 3 relevant resources are available:
+            - Select the most instructionally helpful resources.
+
+            If a URL exists in retrieved metadata:
+            - Always prefer generating a Markdown hyperlink.
+
+            -------------------------------------
+
+            RESPONSE FORMAT
+            - Provide the main answer first.
+            - Only include the hyperlink section if relevant resources are retrieved.
+            - Hyperlinks must appear only in the final section.
+
+            Example Format:
+
+            Relevant Course Resources:
+            • [Resource Title](URL)
+
+            -------------------------------------
+
+            CORRECT EXAMPLE
+            • [Summary Statistics Quiz](https://learn.canvas.net/courses/2251/quizzes/18810)
+
+            INCORRECT EXAMPLES (DO NOT USE)
+            • Summary Statistics Quiz (https://learn.canvas.net/courses/2251/quizzes/18810)
+            • https://learn.canvas.net/courses/2251/quizzes/18810
+
+            -------------------------------------
+
+            WHEN NO RELEVANT KNOWLEDGE IS RETRIEVED
+            - State that no relevant course material was found.
+            - Explain what additional information would help.
+
             """.strip()
 
 
@@ -421,35 +479,25 @@ class Pipeline:
         return data
 
     def run_orchestrator_stream(self, course_url: str):
-        repo_root = Path(os.getenv("ORCH_REPO_ROOT", ORCH_REPO_ROOT_DEFAULT))
-        cli_path = repo_root / ORCH_CLI_REL_DEFAULT
+        runs_root = Path(ORCH_RUNS_ROOT_DEFAULT)
+        orch_py = sys.executable  # use current interpreter
 
-        if not cli_path.exists():
-            yield f"❌ Orchestrator CLI not found at: {cli_path}"
-            yield {"type": "final", "returncode": 2}
-            return
-
-        orch_py = os.getenv("ORCH_PYTHON", ORCH_PYTHON_DEFAULT)
         if not Path(orch_py).exists():
             yield f"❌ Orchestrator python not found: {orch_py}"
             yield {"type": "final", "returncode": 2}
             return
-    
 
-        runs_root = repo_root / ORCH_RUNS_ROOT_DEFAULT      
         run_dir = runs_root / "openwebui"  # matches --run-name openwebui
-        
-        # Recreate runs/openwebui each run
+
         if run_dir.exists():
             shutil.rmtree(run_dir)
-        run_dir.mkdir(parents=True, exist_ok=True) 
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            orch_py,
-            "-u",
+            orch_py, "-u",
             "-m", "orchestrator.cli",
             "--course-url", course_url,
-            "--runs-root", ORCH_RUNS_ROOT_DEFAULT,
+            "--runs-root", ORCH_RUNS_ROOT_DEFAULT,   # 👈 absolute path, respected by orchestrator
             "--depth-limit", str(ORCH_DEPTH_LIMIT_DEFAULT),
             "--model", self.valves.BASE_MODEL_ID,
             "--run-name", "openwebui",
@@ -465,16 +513,14 @@ class Pipeline:
         if self.valves.OPENAI_API_KEY:
             env["OPENAI_API_KEY"] = self.valves.OPENAI_API_KEY
 
-        # Stream lines
         rc = 0
         try:
-            gen = self._stream_process_lines(cmd, cwd=repo_root, env=env)
+            # cwd doesn’t matter much now; PIPELINE_ROOT is fine
+            gen = self._stream_process_lines(cmd, cwd=PIPELINE_ROOT, env=env)
             while True:
                 try:
                     line = next(gen)
-                    if "::STEP::" in line:
-                        clean = line.strip().replace("::STEP::", "- ", 1)
-                        yield f"{clean}\n"
+                    yield line + "\n"  # still dumping everything while debugging
                 except StopIteration as e:
                     rc = e.value if e.value is not None else 0
                     break
@@ -490,56 +536,31 @@ class Pipeline:
 
         yield "✅ Orchestrator finished successfully."
         yield {"type": "final", "returncode": 0}
-        return
-
 
     def run_orchestrator(self, course_url: str) -> dict[str, Any]:
-        repo_root = Path(os.getenv("ORCH_REPO_ROOT", ORCH_REPO_ROOT_DEFAULT))
-        cli_path = repo_root / ORCH_CLI_REL_DEFAULT
-
-        if not cli_path.exists():
-            return {
-                "returncode": 2,
-                "stdout": "",
-                "stderr": f"Orchestrator CLI not found at: {cli_path}\n"
-                        f"Tip: confirm the repo is mounted at {repo_root} inside the pipelines container.",
-                "cmd": "",
-            }
-
-        
-        orch_py = os.getenv("ORCH_PYTHON", ORCH_PYTHON_DEFAULT)
+        runs_root = Path(ORCH_RUNS_ROOT_DEFAULT)
+        orch_py = sys.executable
 
         if not Path(orch_py).exists():
             return {
                 "returncode": 2,
                 "stdout": "",
-                "stderr": (
-                    "❌ Orchestrator environment not ready.\n\n"
-                    "Expected venv python at:\n"
-                    f"  {orch_py}\n\n"
-                    "Fix:\n"
-                    "  Ensure the venv exists and deps are installed, e.g.:\n"
-                    "  /app/pipelines/Open_Canvas/scripts/install_venv_deps.sh\n\n"
-                    "Debug:\n"
-                    "  ls -la /app/pipelines/Open_Canvas/.venv/bin/python"
-                ),
+                "stderr": "❌ Orchestrator environment not ready.\n",
                 "cmd": "",
             }
 
-        runs_root = repo_root / ORCH_RUNS_ROOT_DEFAULT      
-        run_dir = runs_root / "openwebui"  # matches --run-name openwebui
-        
-        # Recreate runs/openwebui each run
+        run_dir = runs_root / "openwebui"
+
         if run_dir.exists():
             shutil.rmtree(run_dir)
-        run_dir.mkdir(parents=True, exist_ok=True) 
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         cmd = [
             orch_py,
             "-u",
             "-m", "orchestrator.cli",
             "--course-url", course_url,
-            "--runs-root", ORCH_RUNS_ROOT_DEFAULT,
+            "--runs-root", ORCH_RUNS_ROOT_DEFAULT,  # 👈 same absolute runs root
             "--depth-limit", str(ORCH_DEPTH_LIMIT_DEFAULT),
             "--model", self.valves.BASE_MODEL_ID,
             "--run-name", "openwebui",
@@ -549,29 +570,15 @@ class Pipeline:
         if self.valves.CANVAS_API_KEY:
             cmd += ["--canvas-token", self.valves.CANVAS_API_KEY]
 
-        if self.valves.OPENAI_API_KEY:
-            # if your cli supports it; otherwise only env var matters
-            os.environ["OPENAI_API_KEY"] = self.valves.OPENAI_API_KEY
-
-        # If you ever decide to expose include dirs later:
-        # cmd += ["--include", "pages,assignments"]  # example
-
         env = os.environ.copy()
-
-        # Canvas token for CLI mode
         if self.valves.CANVAS_API_KEY:
             env["CANVAS_TOKEN"] = self.valves.CANVAS_API_KEY
-
-        # Optional OpenAI key to enable LLM fallback in conversion
-        # (your cli.py enables LLM only if OPENAI_API_KEY exists)
-        # If you want to drive this from a valve later, wire it here.
         if self.valves.OPENAI_API_KEY:
             env["OPENAI_API_KEY"] = self.valves.OPENAI_API_KEY
 
-
         proc = subprocess.run(
             cmd,
-            cwd=str(repo_root),
+            cwd=str(PIPELINE_ROOT),
             env=env,
             capture_output=True,
             text=True,
@@ -583,74 +590,46 @@ class Pipeline:
             "stderr": (proc.stderr or "")[-4000:],
             "cmd": " ".join(cmd),
         }
-        
 
-        
-    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
-        # 1) Open WebUI background: chat title generation
-        if body.get("title"):
-            return "🧱 Canvas Course Provisioner"
 
-        # 2) Open WebUI background: chat tags generation
-        if body.get("tags"):
-            return json.dumps({"tags": ["Education", "Canvas", "RAG"]})
-
-        # 3) Defensive: ignore OWUI “### Task:” prompts even if flags aren't present
-        if user_message and (
-            "### Task:" in user_message
-            or "<chat_history>" in user_message
-        ):
-            return "Ignored background title/tags request."
-
-        # ✅ 3.5) Preflight validation + warnings
-        if not self.valves.OPENWEBUI_API_KEY:
-            return "Missing OPENWEBUI_API_KEY (set it as a valve or env var)."
-
-        warnings: list[str] = []
-        if not self.valves.CANVAS_API_KEY:
-            warnings.append("CANVAS_API_KEY is not set (Canvas ingest not enabled yet).")
-
-        # 4) Require explicit command so normal chat doesn't trigger provision
-        m = re.match(r"^\s*/?provision\s+(.+?)\s*$", user_message or "", flags=re.I)
-        if not m:
-            return "To run this pipeline, send: `provision <course_url>` (example: `provision https://learn.canvas.net/courses/3376`)."
-
-        course_url = m.group(1).strip()
-        if not course_url:
-            return "Provide a Canvas course URL. Example: `provision https://learn.canvas.net/courses/3376`."
-
-        # 5) Parse course URL => base_url + numeric course_id (more stable IDs/names)
-        try:
-            base_url, course_id = _parse_course_url(course_url)
-        except Exception as e:
-            return f"Invalid Canvas course URL: {e}"
-
-        logger.info("User input course_url=%s (base=%s course_id=%s)", course_url, base_url, course_id)
-
-        # 6) Run orchestrator first (engine milestone)
-        # If you haven't added run_orchestrator yet, you can comment this block out.
+    def _stream_provision(
+        self,
+        course_url: str,
+        base_url: str,
+        course_id: str,
+        warnings: list[str],
+    ):
+        # 6) Orchestrator streaming
         orch_rc = None
         for item in self.run_orchestrator_stream(course_url):
             if isinstance(item, dict) and item.get("type") == "final":
                 orch_rc = item.get("returncode", 2)
             else:
-                yield str(item)
-
+                item = str(item).strip()
+                if "::STEP::" in item:
+                    clean = item.replace("::STEP::", "- ", 1)
+                    yield clean + "\n"
+                    
+                
+                
         if orch_rc != 0:
-            return "❌ Orchestrator failed"
+            yield "❌ Orchestrator failed"
+            return
         if orch_rc is None:
-            return "❌ Orchestrator ended without final status"
-        
+            yield "❌ Orchestrator ended without final status"
+            return
+
+        # ✅ NEW: status message once the orchestrator has finished
+        yield "\n[Uploading] Now uploading files and creating the model\n"
+
         u = urlparse(course_url)
         host = u.netloc or "canvas"
         host_slug = _slug(host)
         course_slug = _slug(course_id)
 
         kb_name = f"canvas:{host}:{course_id}"
-
         model_name = f"canvas-{host}-{course_id}"
         stable_model_id = f"canvas-{host_slug}-{course_slug}"
-
 
         # 7) Create KB
         kb = self.create_knowledge(
@@ -659,21 +638,24 @@ class Pipeline:
         )
         kb_id = kb.get("id")
         if not kb_id:
-            return f"KB create returned unexpected payload: {kb}"
+            yield f"KB create returned unexpected payload: {kb}"
+            return
 
-        # 8) Upload chunked Markdown files produced by orchestrator
-        repo_root = Path(os.getenv("ORCH_REPO_ROOT", ORCH_REPO_ROOT_DEFAULT))
-        chunks_dir = repo_root / ORCH_CHUNKS_DIR_DEFAULT
+        # 8) Upload chunks
+        runs_root = Path(ORCH_RUNS_ROOT_DEFAULT)
+        run_dir = runs_root / "openwebui"
+        chunks_dir = run_dir / "chunker" / "chunks"
 
         md_files = self._iter_markdown_files(chunks_dir)
         if not md_files:
-            return (
+            yield (
                 "❌ Orchestrator succeeded, but no chunk .md files were found.\n\n"
                 f"Expected chunks under:\n  {chunks_dir}\n\n"
                 "Next steps:\n"
                 "• Confirm chunker is enabled in the orchestrator run\n"
                 "• Check the orchestrator logs for where chunks were written"
             )
+            return
 
         uploaded_file_ids: List[str] = []
         upload_failures: List[str] = []
@@ -685,7 +667,6 @@ class Pipeline:
                 ex.submit(self._upload_and_attach_one, kb_id, chunks_dir, p): p
                 for p in md_files
             }
-
             for fut in as_completed(futures):
                 p = futures[fut]
                 try:
@@ -697,16 +678,14 @@ class Pipeline:
                 except Exception as e:
                     upload_failures.append(f"{p} -> {e}")
 
-
-        # If some failed, report (but still proceed if some succeeded)
         if not uploaded_file_ids:
-            return (
+            yield (
                 "❌ No chunk files were uploaded successfully.\n\n"
                 "Failures:\n- " + "\n- ".join(upload_failures[:20]) +
                 ("\n\n(Only first 20 shown)" if len(upload_failures) > 20 else "")
             )
+            return
 
-        # Optional warning if partial failure
         if upload_failures:
             warnings.append(
                 f"{len(upload_failures)} chunk files failed to upload (uploaded {len(uploaded_file_ids)})."
@@ -720,11 +699,9 @@ class Pipeline:
             knowledge_name=kb_name,
         )
 
-
         warn_text = ("\n\n⚠️ Warnings:\n- " + "\n- ".join(warnings)) if warnings else ""
 
-        # 11) Success
-        return (
+        yield (
             "Provisioning complete\n\n"
             f"- Input course_url: `{course_url}`\n"
             f"- Parsed: base=`{base_url}`, course_id=`{course_id}`\n"
@@ -735,7 +712,51 @@ class Pipeline:
             "Notes:\n"
             "• OpenWebUI indexes files asynchronously; this pipeline does not wait for processing.\n"
             "• If the KB doesn’t show as attached in the model editor, you can manually attach it once in the UI.\n"
-            f"• Raw model create response (truncated): {str(created_model)[:400]}"
-            f"{warn_text}"
+            f"• Raw model create response (truncated): {str(created_model)[:400]}{warn_text}"
         )
 
+
+
+    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
+        # 1) Title
+        if body.get("title"):
+            return "🧱 Canvas Course Provisioner"
+
+        # 2) Tags
+        if body.get("tags"):
+            return json.dumps({"tags": ["Education", "Canvas", "RAG"]})
+
+        # 3) Ignore background prompt shenanigans
+        if user_message and (
+            "### Task:" in user_message
+            or "<chat_history>" in user_message
+        ):
+            return "Ignored background title/tags request."
+
+        if not self.valves.OPENWEBUI_API_KEY:
+            return "Missing OPENWEBUI_API_KEY (set it as a valve or env var)."
+
+        warnings: list[str] = []
+        if not self.valves.CANVAS_API_KEY:
+            warnings.append("CANVAS_API_KEY is not set (Canvas ingest not enabled yet).")
+
+        m = re.match(r"^\s*/?provision\s+(.+?)\s*$", user_message or "", flags=re.I)
+        if not m:
+            return "To run this pipeline, send: `provision <course_url>` (example: `provision https://learn.canvas.net/courses/3376`)."
+
+        course_url = m.group(1).strip()
+        if not course_url:
+            return "Provide a Canvas course URL. Example: `provision https://learn.canvas.net/courses/3376`."
+
+        try:
+            base_url, course_id = _parse_course_url(course_url)
+        except Exception as e:
+            return f"Invalid Canvas course URL: {e}"
+
+        logger.info("User input course_url=%s (base=%s course_id=%s)", course_url, base_url, course_id)
+
+        # 👉 IMPORTANT: return a generator *object* here.
+        # OpenWebUI will treat this as a streaming pipeline.
+        return self._stream_provision(course_url, base_url, course_id, warnings)
+
+  
