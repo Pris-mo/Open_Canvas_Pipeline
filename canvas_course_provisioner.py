@@ -171,7 +171,46 @@ class Pipeline:
 
         except Exception as e:
             return (str(md_path), None, str(e))
+        
+    def _fetch_canvas_course_name(self, base_url: str, course_id: str) -> Optional[str]:
+            """
+            Use the Canvas API to look up the course name.
 
+            Returns:
+                The course name (or course_code) if available, else None.
+            """
+            if not self.valves.CANVAS_API_KEY:
+                # Already warn in the main flow; keep this quiet to avoid spam.
+                return None
+
+            url = f"{base_url.rstrip('/')}/api/v1/courses/{course_id}"
+            headers = {
+                "Authorization": f"Bearer {self.valves.CANVAS_API_KEY}",
+                "Accept": "application/json",
+            }
+
+            # Be a bit conservative on timeout
+            timeout = max(5, min(self.valves.HTTP_TIMEOUT_SECS, 30))
+
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)
+                resp.raise_for_status()
+            except Exception as e:
+                logger.warning("Canvas course name lookup failed for %s: %s", url, e)
+                return None
+
+            try:
+                data = resp.json()
+            except Exception as e:
+                logger.warning("Canvas course name lookup returned non-JSON for %s: %s", url, e)
+                return None
+
+            name = (data.get("name") or data.get("course_code") or "").strip()
+            if not name:
+                logger.info("Canvas course %s had no usable 'name' or 'course_code' field", course_id)
+                return None
+
+            return name
     def _stream_process_lines(self, cmd: list[str], cwd: Path, env: dict[str, str]):
         """
         Yields lines from stdout/stderr while the process runs.
@@ -627,15 +666,27 @@ class Pipeline:
         host_slug = _slug(host)
         course_slug = _slug(course_id)
 
-        kb_name = f"canvas:{host}:{course_id}"
-        model_name = f"canvas-{host}-{course_id}"
+        # Try to get a human-readable course name from Canvas
+        course_name = self._fetch_canvas_course_name(base_url, course_id)
+        if course_name:
+            display_name = f"Canvas: {course_name}"
+        else:
+            # Fallback if the API call fails or token isn't set
+            display_name = f"Canvas: {host} {course_id}"
+
+        kb_name = display_name
+        model_name = display_name
+
+        # Keep a stable, compact model id that doesn't depend on the full course name
         stable_model_id = f"canvas-{host_slug}-{course_slug}"
 
         # 7) Create KB
+        desc_course = course_name or course_url
         kb = self.create_knowledge(
             name=kb_name,
-            description=f"Autocreated KB for course {course_url}",
+            description=f"Autocreated KB for course {desc_course}",
         )
+
         kb_id = kb.get("id")
         if not kb_id:
             yield f"KB create returned unexpected payload: {kb}"
