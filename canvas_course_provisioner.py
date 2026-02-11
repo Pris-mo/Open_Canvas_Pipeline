@@ -41,7 +41,7 @@ logger = logging.getLogger("canvas_course_provisioner")
 logging.basicConfig(level=logging.INFO)
 
 class Valves(BaseModel):
-    OPENWEBUI_BASE_URL: str = Field(default="http://host.docker.internal:3000")
+    OPENWEBUI_BASE_URL: str = Field(default="http://open-webui:8080")
     OPENWEBUI_API_KEY: str = Field(default="")
 
     CANVAS_API_KEY: str = Field(default="", description="Canvas API token")
