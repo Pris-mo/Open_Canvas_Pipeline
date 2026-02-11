@@ -51,7 +51,6 @@ class Valves(BaseModel):
     BASE_MODEL_ID: str = Field(default="gpt-5")
 
     INCLUDE_METADATA: bool = Field(default=True, description="Include metadata in markdown")
-    INCLUDE_CONTENT_TYPES: Optional[List[str]] = Field(default=None, description="Limit to content types")
 
     HTTP_TIMEOUT_SECS: int = Field(default=30)
 
