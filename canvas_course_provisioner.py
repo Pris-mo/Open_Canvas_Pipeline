@@ -109,7 +109,7 @@ class Pipeline:
             BASE_MODEL_ID=os.getenv("BASE_MODEL_ID", "gpt-5"),
             INCLUDE_METADATA=os.getenv("INCLUDE_METADATA", "true").lower() in ("1", "true", "yes", "y", "on"),
             # Comma-separated env var support if you want it:
-            INCLUDE_CONTENT_TYPES=None,            ,
+            INCLUDE_CONTENT_TYPES=None,            
             HTTP_TIMEOUT_SECS=int(os.getenv("HTTP_TIMEOUT_SECS", "30")),
         )
 
