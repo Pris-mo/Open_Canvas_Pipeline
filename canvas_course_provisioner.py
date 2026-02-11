@@ -1,7 +1,7 @@
 """
 title: canvas_course_provisioner
 description: Provisions a Canvas course assistant in Open WebUI by running the orchestrator, creating a Knowledge Base from produced chunks, and creating a model bound to that KB.
-requirements:requests,pydantic,open-canvas @ git+https://github.com/Pris-mo/Open_Canvas.git@OpenWeb-Packaging
+requirements:requests,pydantic,open-canvas @ git+https://github.com/Pris-mo/Open_Canvas.git
 """
 
 
