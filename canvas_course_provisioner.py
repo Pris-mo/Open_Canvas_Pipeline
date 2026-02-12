@@ -47,12 +47,19 @@ class Valves(BaseModel):
     CANVAS_API_KEY: str = Field(default="", description="Canvas API token")
     OPENAI_API_KEY: str = Field(default="", description="Optional. Enables LLM fallback during conversion/chunking.")
 
-
     BASE_MODEL_ID: str = Field(default="gpt-5")
 
     INCLUDE_METADATA: bool = Field(default=True, description="Include metadata in markdown")
 
     HTTP_TIMEOUT_SECS: int = Field(default=30)
+
+    # NEW: control how much orchestrator output you see
+    DEBUG: bool = Field(
+        default=True,
+        description=(
+            "If true, all output will be streamed to chat."
+        ),
+    )
 
 Valves.model_rebuild()
 def _parse_course_url(course_url: str) -> tuple[str, str]:
@@ -110,6 +117,7 @@ class Pipeline:
             # Comma-separated env var support if you want it:
             INCLUDE_CONTENT_TYPES=None,            
             HTTP_TIMEOUT_SECS=int(os.getenv("HTTP_TIMEOUT_SECS", "30")),
+            DEBUG=os.getenv("DEBUG", "true").lower() in ("1", "true", "yes", "y", "on"),
         )
 
 
@@ -635,6 +643,7 @@ class Pipeline:
     ):
         # 6) Orchestrator streaming
         orch_rc = None
+
         for item in self.run_orchestrator_stream(course_url):
             if isinstance(item, dict) and item.get("type") == "final":
                 orch_rc = item.get("returncode", 2)
@@ -643,7 +652,23 @@ class Pipeline:
                 if "::STEP::" in item:
                     clean = item.replace("::STEP::", "- ", 1)
                     yield clean + "\n"
-                    
+            
+        for item in self.run_orchestrator_stream(course_url):
+            if isinstance(item, dict) and item.get("type") == "final":
+                orch_rc = item.get("returncode", 2)
+            else:
+                line = str(item).rstrip()
+
+                if self.valves.DEBUG:
+                    # Stream all orchestrator output
+                    # (you can keep the ::STEP:: tag, or strip it if you prefer)
+                    clean = line.replace("::STEP::", "- ", 1)
+                    yield clean + "\n"            
+                else:
+                     # Only show STEP lines
+                    if "::STEP::" in line:
+                        clean = line.replace("::STEP::", "- ", 1)
+                        yield clean + "\n"
                 
                 
         if orch_rc != 0:
