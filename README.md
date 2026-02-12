@@ -18,7 +18,11 @@ So your workflow becomes:
 ---
 
 <!-- 📸 Optional: replace this with a real screenshot or diagram -->
-<img src="docs/imgs/image26.png" alt="Open Canvas Demo" width="40%" />
+<img src="docs/imgs/image26.png"
+     alt="Open Canvas Demo"
+     style="border: 1px solid #ccc; border-radius: 6px; padding: 4px;"
+     width="80%"
+      />
 
 
 ---

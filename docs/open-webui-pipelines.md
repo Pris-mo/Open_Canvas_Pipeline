@@ -31,7 +31,10 @@ Click **Add Connection**
 <details>
   <summary>Show screenshot</summary>
 
-  ![][image18]
+<img src="imgs/image18.png"
+     alt="Screenshot"
+     style="border: 1px solid #ccc; border-radius: 6px; padding: 4px;" />
+
 
 </details>
 
@@ -217,7 +220,6 @@ Your Open WebUI instance is now:
 
 You’re ready to begin provisioning courses.
 
-[image18]: imgs/image18.png  
 [image19]: imgs/image19.png  
 [image20]: imgs/image20.png  
 [image21]: imgs/image21.png  
