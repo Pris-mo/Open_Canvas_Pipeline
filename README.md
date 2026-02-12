@@ -18,7 +18,8 @@ So your workflow becomes:
 ---
 
 <!-- 📸 Optional: replace this with a real screenshot or diagram -->
-![Open Canvas Pipeline overview](docs/imgs/overview.png)
+<img src="docs/imgs/image26.png" alt="Open Canvas Demo" width="40%" />
+
 
 ---
 
