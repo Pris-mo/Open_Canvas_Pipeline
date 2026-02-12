@@ -1,254 +1,94 @@
-# **Get Your Canvas LMS API Key**
+# Open Canvas Pipeline
 
-To allow the system to access your course content, you’ll need a **Canvas API key** (sometimes called an “access token”).
+Turn your Canvas course into a structured, searchable assistant inside [Open WebUI](https://docs.openwebui.com/).
 
-An API key lets this application securely connect to your Canvas account to retrieve course materials. It does **not** give the application access to your password.
+[Open WebUI](https://docs.openwebui.com/) is a friendly, self-hosted interface for working with LLMs. This project plugs your **Canvas** course into that world: instead of digging through modules, files, and announcements, you can just *ask questions* like “What’s due this week?” or “What is Homework 1 actually asking for?”
 
----
+Behind the scenes, the Open Canvas Pipeline:
 
-**⚠️ Important:**  
- Not all Canvas instances allow students to generate API keys.  
- If you don’t see the option described below, you may need to contact your Canvas administrator or IT department for help.
+- Connects to your Canvas course
+- Pulls down the content it’s allowed to see
+- Converts it into a searchable knowledge base
+- Spins up a **course-specific chat model** you and your students can talk to
 
----
+So your workflow becomes:
 
-### **Step 1: Log in to Canvas**
-
-Go to your institution’s Canvas site and log in.
-
----
-
-### **Step 2: Open Account Settings**
-
-1. Click **Account** in the left sidebar
-
-2. Click **Settings**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image1]
-
-</details>
+> Provision a course → wait a bit → chat with it.
 
 ---
 
-### **Step 3: Generate a New Access Token**
-
-1. Scroll down to the **Approved Integrations** section
-
-2. Click **\+ New Access Token**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image2]
-
-</details>
-
-
-3. Give the token a name (for example: `Open_Canvas_Pipeline`)
-
-4. (Optional) Set an expiration date
-
-5. Click **Generate Token**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image3]
-
-</details>
-
+<!-- 📸 Optional: replace this with a real screenshot or diagram -->
+![Open Canvas Pipeline overview](docs/imgs/overview.png)
 
 ---
 
-### **Step 4: Copy and Save Your Token**
+## What you’ll be able to do
 
-Canvas will now display your API token.
+When you’re done setting this up, you’ll be able to:
 
-⚠️ **Important:** This is the only time Canvas will show you the full token.  
- Copy it and save it somewhere secure.
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image4]
-
-</details>
-
+- **Provision** a course-specific chat model from a Canvas course URL  
+- **Ask questions** like “What’s due this week?” or “What is Homework 1 about?”  
+- **Keep things up to date** by updating the model and course knowledge over time  
 
 ---
 
-### **If You Don’t See “New Access Token”**
 
-Some institutions disable personal API token generation for students.
+## Quickstart
 
-If you do not see the **\+ New Access Token** button:
+1. Run the application with Docker  
+2. Configure Open WebUI & Pipelines  
+3. Install and configure the Canvas Course Provisioner pipeline  
+4. Provision a Canvas course  
+5. Chat with your course
 
-* Contact your Canvas administrator or IT department
+If you need help getting API keys, see:
 
-* Ask whether personal access tokens are enabled
-
-* If not, ask whether they can generate one for you
-
----
-
-# **Get Your OpenAI API Key (Optional)**
-
-If you’d like to use OpenAI models (such as GPT-5-class models) inside the application, you’ll need an **OpenAI API key**.
-
-An API key allows this application to securely send requests to OpenAI’s servers on your behalf. It does **not** share your password.
-
-⚠️ This step is optional, but strongly recommended for new Open WebUI users. Adding an OpenAI API key enables higher-quality content retrieval and automatically makes OpenAI models available in your Open WebUI instance. 
+- **Open-WebUI Key (required):** [Get a Open-WebUI Key](docs/open-webui-api.md) 
+- **Canvas API key (required):** [Get a Canvas API key](docs/canvas-api-key.md)  
+- **OpenAI API key (optional):** [Get an OpenAI API key](docs/openai-api-key.md)
 
 ---
 
-### **Step 1: Create or Log In to Your OpenAI Account**
-
-Go to:
-
-👉 [https://platform.openai.com/](https://platform.openai.com/)
-
-Sign in or create an account.
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image5]
-
-</details>
-
-
----
-
-### **Step 2: Navigate to API Keys**
-
-1. Click your profile icon (top right)  
-2. Select **View API keys**  
-    (or go directly to [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys))
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image6]
-
-</details>
-
-
----
-
-### **Step 3: Create a New API Key**
-
-1. Click **Create new secret key**
-
-2. Give it a name (for example: `Open_Canvas_Pipeline`)
-
-3. Click **Create**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image7]
-
-</details>
-
-
----
-
-### **Step 4: Copy and Save Your Key**
-
-OpenAI will now display your API key.
-
-⚠️ **Important:** This is the only time you’ll see the full key.  
- Copy it and store it somewhere secure.
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image8]
-
-</details>
-
-
-## **Add Prepaid Billing to Your OpenAI Account**
-
----
-
-### **Recommendation**
-
-When adding prepaid credits:
-
-* Start with the **lowest available amount**
-
-* Monitor usage in your OpenAI dashboard
-
-* Increase only if needed
-
-For typical experimentation and course use, small balances often last a long time.
-
-# **Install Docker**
-
-This project runs inside **Docker**, which is a tool that lets you run software in a self-contained environment.
-
-Think of Docker like a lightweight virtual machine: it bundles the app and everything it needs (libraries, dependencies, system tools) so you don’t have to manually install and configure all of that yourself. It helps make sure the project runs the same way on every computer.
-
-### **How to install Docker**
-
-There are two main ways to install it:
-
-* **Recommended (easiest):** Install **Docker Desktop**  
-   \- [https://docs.docker.com/desktop/](https://docs.docker.com/desktop/)  
-   This includes everything you need and works well for most users.
-
-* **Advanced (command line only):**  
-  \-  [https://docs.docker.com/engine/install/](https://docs.docker.com/engine/install/)  
-  This is typically used on Linux systems or servers.
-
-After installation, make sure Docker is running before continuing to the next steps.
-
-# **Run the Application with Docker**
-
-Now that Docker is installed, we’ll use it to start the application.
+## 1. Run the Application with Docker
 
 Docker uses a **compose file** (`docker-compose.yaml`) to define and run multiple services together. In this case, it starts:
 
-* **Open WebUI** \- the main interface you’ll use
+- **Open WebUI** – the main interface you’ll use  
+- **Pipelines** – the background service that powers course ingestion and automation  
 
-* **Pipelines** \- the background service that powers course ingestion and automation
+If you’re new to Docker or need help installing it, see:  
+👉 [Docker setup & basics](docs/docker-install.md)
 
----
+### 1.1 Download the compose file
 
-### **1\. Download the Compose File**
+Download `docker-compose.yaml` from this repository:
 
-Download the `docker-compose.yaml` file from this repository:
-
-\- [https://github.com/Pris-mo/Open\_Canvas\_Pipeline/blob/main/docker-compose.yaml](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docker-compose.yaml)
+- https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docker-compose.yaml
 
 Save it in a new folder on your computer (for example, `Open_Canvas_Pipeline`).
 
 ---
 
-### **2\. (Optional) Add Your OpenAI API Key**
+### 1.2 (Optional) Add your OpenAI API key
 
-If you’d like OpenAI models available when the app starts, you can add your API key. See section Create an OpenAI API Key for more info.
+If you’d like OpenAI models available when the app starts, you can add your API key.  
+(See [Get an OpenAI API Key](docs/openai-api-key.md) for more details.)
 
 Open `docker-compose.yaml` and find:
 
-`- OPENAI_API_KEY=${OPENAI_API_KEY:-}`
-
-Replace it with:
+- Replace it with:
 
 `- OPENAI_API_KEY=your_key_here`
 
-Example:   
+Example:
+
 `- OPENAI_API_KEY=sk-proj-123abc`
 
-This step is optional. The application will still run without it.
+This step is optional, but highly recommended if you want to simplify your setup process. The application will still run without it.
 
 ---
 
-### **3\. Start the Application**
+### **1.3 Start the application**
 
 Open a terminal in the folder containing `docker-compose.yaml`, then run:
 
@@ -257,21 +97,21 @@ Open a terminal in the folder containing `docker-compose.yaml`, then run:
 The `-d` flag runs everything in the background.
 
 The first time you run this, Docker will download and set everything up.  
- This can take several minutes (\~5-10 minutes is normal).
+ This can take several minutes.
 
 ---
 
-### **4\. Open the Web Interface**
+### **1.4 Open the web interface**
 
-Once it finishes starting up, open your browser and go to:
+Once the containers are running, open your browser and go to:
 
-\- [http://localhost:3000](http://localhost:3000)
+* [http://localhost:3000](http://localhost:3000)
 
-You should see the Open WebUI interface. If the page is not loading, the application may still be building (Did you wait 5-10 minutes?). If you’ve waited long enough see troubleshooting below. 
+You should see the Open WebUI interface. If it is not loading, please know that it can take 5-10 minutes to initalize the first time you run the container. 
 
 ---
 
-### **5\. If Something Seems Stuck**
+### **1.5 If something seems stuck**
 
 You can check what’s happening behind the scenes by viewing logs:
 
@@ -283,368 +123,132 @@ or
 
 ---
 
-### **To Stop the Application**
+### **1.6 Stop the application**
 
-If you want to shut everything down:
+To shut everything down:
 
 `docker compose down`
 
-# **Configure Open WebUI & Pipelines**
+---
 
-Now that everything is running, we’ll configure Open WebUI so it can:
+## **2\. Configure Open WebUI & Pipelines**
 
-1. Allow API access  
-2. Connect to Pipelines  
-3. Install the Canvas provisioning pipeline
+Once Open WebUI is running, you’ll configure it so it can:
 
-You’ll complete these steps inside the Open WebUI interface.
+1. Allow API access
+
+2. Connect to the Pipelines service
+
+3. Install the Canvas Course Provisioner pipeline
+
+At a high level, you will:
+
+1. **Enable API keys in Open WebUI**
+
+2. **Generate an Open WebUI API key**
+
+3. **Add a Pipelines connection**
+
+   * URL: `http://pipelines:9099/v1`
+
+   * Bearer token: `0p3n-w3bu!`
+
+4. **Install the Canvas pipeline from GitHub**
+
+    * `https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/canvas_course_provisioner.py`
+
+5. **Fill in the pipeline settings**
+
+   * OpenWebUI URL
+
+   * OpenWebUI API key
+
+   * Canvas API key
+
+   * (Optional) OpenAI API key
+
+   * Base model ID (e.g. `gpt-5`)
+
+For a step-by-step walkthrough with screenshots, see:
+
+➡️ [**Configure Open WebUI & Pipelines**](docs/open-webui-pipelines.md)
 
 ---
 
-## **Enable API Access in Open WebUI**
+## **3\. 🎉 Setup Complete**
 
-### **Step 1: Open the Admin Panel**
+At this point, your Open WebUI instance is:
 
-1. Click your **profile icon** in the lower-left corner  
-2. Select **Admin Panel**
+* API-enabled
 
-<details>
-  <summary>Show screenshot</summary>
+* Connected to Pipelines
 
-  ![][image9]
-
-</details>
-  
----
-
-### **Step 2: Create an Admin Group**
-
-1. Navigate to **Users \-\> Groups**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image10]
-
-</details>
-
-
-2. Click **Create Group,** name it: `Admins`
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image11]
-
-</details>
-
-
-3. Select **Permissions**, scroll down to **API Keys**, Toggle it to **On,** Then select **Save**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image12]
-
-</details>
-
----
-
-### **Step 3: Add Yourself to the Admin Group**
-
-1. Open the **Admins** group, select **Users**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image13]
-
-</details>
-
-
-2. Add your user account
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image14]
-
-</details>
-  
----
-
-### **Step 4: Enable API Keys Globally**
-
-1. Go to **Admin Panel \-\> Settings**  
-2. Toggle **Enable API Keys**  
-3. Click **Save**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image15]
-
-</details>
-
-
-## **Generate Your Open WebUI API Key**
-
-You’ll need this key to allow the pipeline to communicate with Open WebUI.
-
-1. Click your **profile icon,** select **Settings**  
-
-   
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image16]
-
-</details>
-  
-2. Select **Account,** Click **API Keys \-\> Show**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image17]
-
-</details>
-
-
-3. Select **\+ Create new secret key**  
-4. Copy and save the key securely
-
-You’ll use this shortly.
-
----
-
-## **Connect Open WebUI to Pipelines**
-
-Now we’ll create the internal connection between Open WebUI and the Pipelines service.
-
-### **Step 1: Add a New Connection**
-
-Navigate to:
-
-**Admin Panel \-\> Settings \-\> Connections**
-
-Click **Add Connection**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image18]
-
-</details>
-
----
-
-### **Step 2: Enter Connection Details**
-
-Set:
-
-**URL:**  `http://pipelines:9099/v1`  
-**Bearer Token:**  `0p3n-w3bu!`  
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image19]
-
-</details>
-
-
-Then click **Verify Connection**.
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image20]
-
-</details>
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image21]
-
-</details>
-
-
-If verification succeeds, click **Save**.
-
----
-
-## **Install the Canvas Pipeline**
-
-Now we’ll load the pipeline file from GitHub.
-
-### **Step 1: Install from GitHub**
-
-Navigate to:
-
-**Admin Panel \-\> Settings \-\> Pipelines**
-
-In the **Install from GitHub URL** field, enter:
-
-`https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/canvas_course_provisioner.py`
-
-Click the upload/install icon.
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image22]
-
-</details>
-
-
----
-
-### **Step 2: Wait for Installation**
-
-The system will:
-
-* Download the file  
-* Install dependencies  
-* Initialize the pipeline
-
-This can take anywhere from **30 seconds to 5+ minutes**, depending on your system.
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image23]
-
-</details>
-  
----
-
-## **Configure the Pipeline Settings**
-
-Once installed, update the following fields:
-
----
-
-### **OpenWebUI Base URL**
-
-Default:
-
-`http://open-webui:8080`
-
-You typically do not need to change this.
-
----
-
-### **OpenWebUI API Key**
-
-Paste the key you generated earlier in:
-
- **Generate Your Open WebUI API Key**
-
----
-
-### **Canvas API Key**
-
-Paste the key retrieved from:
-
-**Retrieve Canvas API Key**
-
----
-
-### **OpenAI API Key (Optional)**
-
-Paste your OpenAI key here if desired.
-
-Including this enables:
-
-* Higher-quality processing  
-* Better handling of scanned or complex documents  
-* Improved content retrieval
-
----
-
-### **Base Model ID**
-
-Enter the exact model name you want to use.
-
-Default:
-
-`GPT-5`
-
-(You may use any model available in your Open WebUI instance.) To install local or other models see documentation here:  
-[https://docs.openwebui.com/getting-started/quick-start/starting-with-ollama/](https://docs.openwebui.com/getting-started/quick-start/starting-with-ollama/)
-
----
-
-### **Include Metadata**
-
-Enable this if you want the assistant to reference:
-
-* File URLs  
-* Due dates  
-* Points possible  
-* Canvas metadata
-
-Recommended: **On**
-
----
-
-### **HTTP Timeout (Seconds)**
-
-Increase this if:
-
-* Files are failing to download  
-* Large documents are timing out
-
-Most users can leave this unchanged.
-
----
-
-After completing all fields:
-
-Click **Save**
-
-<details>
-  <summary>Show screenshot</summary>
-
-  ![][image24]
-
-</details>
-  
----
-
-# **🎉 Setup Complete**
-
-Your Open WebUI instance is now:
-
-* API-enabled  
-* Connected to Pipelines  
 * Configured with the Canvas provisioning system
 
 You’re ready to begin provisioning courses.
 
-[image1]: imgs/image1.png
-[image2]: imgs/image2.png
-[image3]: imgs/image3.png
-[image4]: imgs/image4.png
-[image5]: imgs/image5.png
-[image6]: imgs/image6.png
-[image7]: imgs/image7.png
-[image8]: imgs/image8.png
-[image9]: imgs/image9.png
-[image10]: imgs/image10.png
-[image11]: imgs/image11.png
-[image12]: imgs/image12.png
-[image13]: imgs/image13.png
-[image14]: imgs/image14.png
-[image15]: imgs/image15.png
-[image16]: imgs/image16.png
-[image17]: imgs/image17.png
-[image18]: imgs/image18.png
-[image19]: imgs/image19.png
-[image20]: imgs/image20.png
-[image21]: imgs/image21.png
-[image22]: imgs/image22.png
-[image23]: imgs/image23.png
-[image24]: imgs/image24.png
+---
+
+## **4\. 🚀 Provision a Canvas Course**
+
+Follow these steps to create a course-specific chat model:
+
+1. Open a **new chat window** in Open WebUI.
+
+2. Select the **Canvas Course Provisioner** model.
+
+   * If you don’t see it, use the search bar to find it.
+
+
+<details>
+  <summary>Show screenshot</summary>
+
+  ![][image25]
+
+</details>
+
+Send a message in this format:
+
+ `Provision <Canvas Course URL>`  
+ **Example:**
+
+ `Provision https://www.instructure.com/courses/1234`
+
+
+3. Wait for the process to complete.
+
+   * You can monitor progress directly in the chat.
+
+   * Once finished, your course model will be ready to use.
+
+---
+
+## **5\. 💬 Chat With Your Course**
+
+After provisioning is complete:
+
+1. Open a **new chat window**.
+
+2. Select your course-specific model.
+
+   * Naming format: `Canvas:<Course Name>`
+
+3. Ask questions about your course.  
+    Examples:
+
+   * “What’s this course about?”
+
+   * “What am I supposed to do in HW1?”
+
+   * “When is the midterm?”
+
+---
+
+For advanced options like customizing the model behavior or updating the course knowledge base, see:
+
+* **For More Info on Customizing the model and knowledge** → [Customizing the model and knowledge](docs/customizing-model-and-knowledge.md) 
+
+
+
+
+[image25]: docs/imgs/image25.png  
