@@ -230,6 +230,15 @@ After provisioning is complete:
 
    * Naming format: `Canvas:<Course Name>`
 
+
+<details>
+  <summary>Show screenshot</summary>
+
+  ![][image27]
+
+</details>
+
+
 3. Ask questions about your course.  
     Examples:
 
@@ -249,3 +258,4 @@ For advanced options like customizing the model behavior or updating the course 
 
 
 [image25]: docs/imgs/image25.png  
+[image27]: docs/imgs/image27.png  
