@@ -128,14 +128,6 @@ or
 
 ---
 
-### **1.6 Stop the application**
-
-To shut everything down:
-
-`docker compose down`
-
----
-
 ## **2\. Configure Open WebUI & Pipelines**
 
 Once Open WebUI is running, you’ll configure it so it can:
