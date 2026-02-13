@@ -55,7 +55,7 @@ class Valves(BaseModel):
 
     # NEW: control how much orchestrator output you see
     DEBUG: bool = Field(
-        default=True,
+        default=False,
         description=(
             "If true, all output will be streamed to chat."
         ),
