@@ -133,7 +133,7 @@ You typically do not need to change this.
 
 Paste the key you generated earlier in:
 
-**Generate Your Open WebUI API Key**
+[Generate Your Open WebUI API Key](docs/open-webui-api.md) 
 
 ---
 
