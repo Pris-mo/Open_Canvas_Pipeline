@@ -207,7 +207,7 @@ Follow these steps to create a course-specific chat model:
 
 Send a message in this format:
 
- `Provision <Canvas Course URL>`  
+ `Provision <Insert Your Canvas Course URL Here>`  
  **Example:**
 
  `Provision https://www.instructure.com/courses/1234`
