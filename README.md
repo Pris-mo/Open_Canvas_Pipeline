@@ -72,38 +72,57 @@ Download `docker-compose.yaml` from this repository:
 Save it in a new folder on your computer (for example, `Open_Canvas_Pipeline`).
 
 ---
+## **1.2 Add your OpenAI API key**
 
-### 1.2 Add your OpenAI API key
-
-In order for you to use OpenAI models when the app starts, you will need to add your API key.  
-(See [Get an OpenAI API Key](docs/openai-api-key.md) for more details.)
+To use OpenAI models inside Open WebUI, you must add your API key.
 
 Open `docker-compose.yaml` and find:
 
-- Replace it with:
+`- OPENAI_API_KEY=`
 
-`- OPENAI_API_KEY=your_key_here`
-
-Example:
+Replace it with your actual key, for example:
 
 `- OPENAI_API_KEY=sk-proj-123abc`
 
-This step tells Open WebUI which OpenAI account to use so the course assistant can utilize openAI models as soon as the container starts. For almost all users, this is **required**.
+This ensures Open WebUI can access OpenAI models as soon as it starts.
 
-If you skip this, you’ll need to manually set up and manage models directly in Open WebUI by following their documentation: <https://docs.openwebui.com/features/ai-knowledge/models>, which is an advanced, non-trivial setup. You should **only** skip adding an OpenAI key here if you are already experienced with Open WebUI and comfortable configuring your own models there.
+> **If you skip this:**  
+ You’ll have to manually configure models inside Open WebUI, which is more advanced. Only skip the key if you’re already comfortable with Open WebUI’s internal model setup:  
+ [https://docs.openwebui.com/features/ai-knowledge/models](https://docs.openwebui.com/features/ai-knowledge/models)
+
+## **Before continuing: make sure Docker is running**
+
+If you installed **Docker Desktop**, you must **open Docker Desktop first** and wait until it says it is running.  
+ If Docker is not running, the next step will fail.
 
 ---
 
-### **1.3 Start the application**
+## **1.3 Start the application**
 
-Open a terminal in the folder containing `docker-compose.yaml`, then run:
+### **Open a command line / terminal**
+
+Open a terminal window in the folder where you saved `docker-compose.yaml`.
+
+Examples:
+
+* **Windows:**  
+   Open the folder → Shift \+ Right-click → *Open PowerShell window here*  
+   *(Or use Terminal / PowerShell and navigate to the folder.)*
+
+* **Mac:**  
+   Open Terminal → drag the folder into the window  
+   *(or use `cd path/to/folder`)*
+
+* **Linux:**  
+   Open your preferred terminal and `cd` into the folder.
+
+Once you’re in the correct folder, start the application:
 
 `docker compose up -d`
 
 The `-d` flag runs everything in the background.
 
-The first time you run this, Docker will download and set everything up.  
- This can take several minutes.
+The **first** time you run this, Docker will download all required components — this may take a few minutes.
 
 ---
 
