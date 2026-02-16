@@ -18,3 +18,16 @@ There are two main ways to install it:
   This is typically used on Linux systems or servers.
 
 After installation, make sure Docker is running before continuing to the next steps.
+
+### **Windows users: One extra step**
+
+If you're on **Windows**, Docker Desktop may prompt you to enable the **Windows Subsystem for Linux (WSL 2\)**.  
+ This is a built-in Windows feature that lets Docker run Linux-based containers smoothly. Enabling WSL2 only takes a moment, and Docker Desktop will guide you through it if needed.
+
+
+### **After installing Docker**
+
+**You’ll likely need to restart your computer** before Docker works correctly. This is normal and ensures all system components are properly initialized.
+
+Once Docker is installed *and running*, you're ready for the next step.
+
