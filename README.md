@@ -17,7 +17,6 @@ So your workflow becomes:
 
 ---
 
-<!-- 📸 Optional: replace this with a real screenshot or diagram -->
 <img src="docs/imgs/image26.png"
      alt="Open Canvas Demo"
      style="border: 1px solid #ccc; border-radius: 6px; padding: 4px;"
@@ -74,9 +73,9 @@ Save it in a new folder on your computer (for example, `Open_Canvas_Pipeline`).
 
 ---
 
-### 1.2 (Optional) Add your OpenAI API key
+### 1.2 Add your OpenAI API key
 
-If you’d like OpenAI models available when the app starts, you can add your API key.  
+In order for you to use OpenAI models when the app starts, you will need to add your API key.  
 (See [Get an OpenAI API Key](docs/openai-api-key.md) for more details.)
 
 Open `docker-compose.yaml` and find:
@@ -89,7 +88,9 @@ Example:
 
 `- OPENAI_API_KEY=sk-proj-123abc`
 
-This step is optional, but highly recommended if you want to simplify your setup process. The application will still run without it.
+This step tells Open WebUI which OpenAI account to use so the course assistant can utilize openAI models as soon as the container starts. For almost all users, this is **required**.
+
+If you skip this, you’ll need to manually set up and manage models directly in Open WebUI by following their documentation: <https://docs.openwebui.com/features/ai-knowledge/models>, which is an advanced, non-trivial setup. You should **only** skip adding an OpenAI key here if you are already experienced with Open WebUI and comfortable configuring your own models there.
 
 ---
 
@@ -162,7 +163,7 @@ At a high level, you will:
 
    * Canvas API key
 
-   * (Optional) OpenAI API key
+   * OpenAI API key
 
    * Base model ID (e.g. `gpt-5`)
 
