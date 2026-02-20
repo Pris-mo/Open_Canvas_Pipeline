@@ -31,14 +31,15 @@ import uuid
 PIPELINE_ROOT = Path(__file__).resolve().parent
 ORCH_RUNS_ROOT_DEFAULT = str(PIPELINE_ROOT / "runs")  # e.g. /app/pipelines/Open_Canvas_Pipeline/runs
 ORCH_DEPTH_LIMIT_DEFAULT = 10
-UPLOAD_WORKERS_DEFAULT = 4
+# How many files to upload in parallel to Open WebUI
+UPLOAD_WORKERS_DEFAULT = int(os.getenv("UPLOAD_WORKERS", "12"))
 FILE_PROCESS_DEFAULT = True
 FILE_PROCESS_IN_BACKGROUND_DEFAULT = True
 
 
-
 logger = logging.getLogger("canvas_course_provisioner")
 logging.basicConfig(level=logging.INFO)
+
 
 class Valves(BaseModel):
     OPENWEBUI_BASE_URL: str = Field(default="http://open-webui:8080")
@@ -61,7 +62,10 @@ class Valves(BaseModel):
         ),
     )
 
+
 Valves.model_rebuild()
+
+
 def _parse_course_url(course_url: str) -> tuple[str, str]:
     """
     Accepts:
@@ -93,15 +97,15 @@ def _parse_course_url(course_url: str) -> tuple[str, str]:
 
     return base_url, course_id
 
+
 def _slug(s: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
     return s[:60]
 
 
-
 class Pipeline:
     Valves = Valves
-  
+
     def __init__(self):
         # This is what makes it show up as a "model" in Open WebUI
         self.name = "Canvas Course Provisioner"
@@ -111,15 +115,14 @@ class Pipeline:
             OPENWEBUI_BASE_URL=os.getenv("OPENWEBUI_BASE_URL", "http://host.docker.internal:3000"),
             OPENWEBUI_API_KEY=os.getenv("OPENWEBUI_API_KEY", ""),
             CANVAS_API_KEY=os.getenv("CANVAS_API_KEY", ""),
-            OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),           
+            OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),
             BASE_MODEL_ID=os.getenv("BASE_MODEL_ID", "gpt-5"),
             INCLUDE_METADATA=os.getenv("INCLUDE_METADATA", "true").lower() in ("1", "true", "yes", "y", "on"),
             # Comma-separated env var support if you want it:
-            INCLUDE_CONTENT_TYPES=None,            
+            INCLUDE_CONTENT_TYPES=None,
             HTTP_TIMEOUT_SECS=int(os.getenv("HTTP_TIMEOUT_SECS", "30")),
             DEBUG=os.getenv("DEBUG", "true").lower() in ("1", "true", "yes", "y", "on"),
         )
-
 
     async def on_startup(self):
         logger.info("Pipeline startup: canvas_course_provisioner")
@@ -174,46 +177,204 @@ class Pipeline:
 
         except Exception as e:
             return (str(md_path), None, str(e))
-        
+
     def _fetch_canvas_course_name(self, base_url: str, course_id: str) -> Optional[str]:
-            """
-            Use the Canvas API to look up the course name.
+        """
+        Use the Canvas API to look up the course name.
 
-            Returns:
-                The course name (or course_code) if available, else None.
-            """
-            if not self.valves.CANVAS_API_KEY:
-                # Already warn in the main flow; keep this quiet to avoid spam.
-                return None
+        Returns:
+            The course name (or course_code) if available, else None.
+        """
+        if not self.valves.CANVAS_API_KEY:
+            # Already warn in the main flow; keep this quiet to avoid spam.
+            return None
 
-            url = f"{base_url.rstrip('/')}/api/v1/courses/{course_id}"
-            headers = {
-                "Authorization": f"Bearer {self.valves.CANVAS_API_KEY}",
-                "Accept": "application/json",
-            }
+        url = f"{base_url.rstrip('/')}/api/v1/courses/{course_id}"
+        headers = {
+            "Authorization": f"Bearer {self.valves.CANVAS_API_KEY}",
+            "Accept": "application/json",
+        }
 
-            # Be a bit conservative on timeout
+        # Be a bit conservative on timeout
+        timeout = max(5, min(self.valves.HTTP_TIMEOUT_SECS, 30))
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+        except Exception as e:
+            logger.warning("Canvas course name lookup failed for %s: %s", url, e)
+            return None
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            logger.warning("Canvas course name lookup returned non-JSON for %s: %s", url, e)
+            return None
+
+        name = (data.get("name") or data.get("course_code") or "").strip()
+        if not name:
+            logger.info("Canvas course %s had no usable 'name' or 'course_code' field", course_id)
+            return None
+
+        return name
+
+    # ----------------------------
+    # Key validation helpers
+    # ----------------------------
+    def _validate_openwebui_key(self) -> tuple[bool, Optional[str]]:
+        """
+        Validate that the OpenWebUI API key works for the configured base URL.
+        """
+        if not self.valves.OPENWEBUI_API_KEY:
+            err = (
+                "Error: Your OpenWebUI API key is missing or invalid. "
+                "Please note that this is a separate key from your OpenAI API key.\n"
+                "To create an OpenWebUI API key, follow "
+                "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/open-webui-api.md)."
+            )
+            return False, err
+
+        try:
+            # Use a lightweight, authenticated endpoint.
+            resp = self._http(
+                "GET",
+                "/api/v1/models",
+                timeout=max(5, min(self.valves.HTTP_TIMEOUT_SECS, 30)),
+            )
+            self._require_ok(resp, "validate_openwebui")
+        except Exception as e:
+            logger.warning("OpenWebUI API key validation failed: %s", e)
+            err = (
+                "**Error OpenWebUI:** Your OpenWebUI **API key is invalid**, or, your **OpenWebUI base URL is incorrect** \n"
+                "Please note that this is a separate key from your OpenAI API key.\n"
+                "To create or verify your OpenWebUI API key, follow "
+                "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/open-webui-api.md)."
+            )
+            return False, err
+
+        return True, None
+
+    def _validate_canvas_key(
+        self,
+        base_url: str,
+        course_id: str,
+        course_url: str,
+    ) -> tuple[bool, Optional[str], Optional[str]]:
+        """
+        Validate that the Canvas key exists and can read the given course.
+        Returns (ok, error_message_or_None, course_name_or_None).
+        """
+        if not self.valves.CANVAS_API_KEY:
+            err = (
+                "**Error Canvas:** Your Canvas **API key is invalid or missing**. "
+                f"Please ensure that it has access to `{course_url}`.\n"
+                "For help provisioning your Canvas API key, please follow "
+                "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/canvas-api-key.md)."
+            )
+            return False, err, None
+
+        course_name = self._fetch_canvas_course_name(base_url, course_id)
+        if not course_name:
+            err = (
+                "**Error Canvas:** Your Canvas **API key is invalid, expired, or does not have access** to this course. "
+                f"Please ensure that it has access to `{course_url}`.\n"
+                "For help provisioning your Canvas API key, please follow "
+                "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/canvas-api-key.md)."
+            )
+            return False, err, None
+
+        return True, None, course_name
+    def _validate_openai_key(self) -> tuple[bool, Optional[str]]:
+        """
+        Validate that the OpenAI key (if present) appears usable.
+
+        This is *soft*: failures become warnings and do not block provisioning.
+        """
+        key = (self.valves.OPENAI_API_KEY or "").strip()
+
+        # Case 1: no key provided at all
+        if not key:
+            warning = (
+                "Warning: No OpenAI API key was provided. "
+                "You will not be able to run an OpenAI-hosted model, and documents containing images "
+                "or hard-to-parse content may not make it into your knowledge base.\n"
+                "For help provisioning an OpenAI API key, please follow "
+                "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/openai-api-key.md)."
+            )
+            return False, warning
+
+        try:
             timeout = max(5, min(self.valves.HTTP_TIMEOUT_SECS, 30))
+            resp = requests.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=timeout,
+            )
 
-            try:
-                resp = requests.get(url, headers=headers, timeout=timeout)
-                resp.raise_for_status()
-            except Exception as e:
-                logger.warning("Canvas course name lookup failed for %s: %s", url, e)
-                return None
-
+            # Try to parse error payload if present
             try:
                 data = resp.json()
-            except Exception as e:
-                logger.warning("Canvas course name lookup returned non-JSON for %s: %s", url, e)
-                return None
+            except Exception:
+                data = None
 
-            name = (data.get("name") or data.get("course_code") or "").strip()
-            if not name:
-                logger.info("Canvas course %s had no usable 'name' or 'course_code' field", course_id)
-                return None
+            # Case 2: explicit "invalid_api_key" (what you just saw in your test)
+            if resp.status_code == 401:
+                err_code = None
+                err_msg = None
+                if isinstance(data, dict):
+                    err = data.get("error") or {}
+                    err_code = err.get("code") or None
+                    err_msg = err.get("message") or None
 
-            return name
+                logger.warning(
+                    "OpenAI API returned 401 during validation (code=%r, message=%r)",
+                    err_code,
+                    (err_msg or "")[:200],
+                )
+
+                warning = (
+                    "**Warning OpenAI:** Your *OpenAI API key appears to be invalid. "
+                    "The OpenAI API returned an authentication error.\n"
+                    "You will not be able to run an OpenAI-hosted model, and documents containing images "
+                    "or hard-to-parse content may not make it into your knowledge base.\n"
+                    "For help provisioning an OpenAI API key, please follow "
+                    "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/openai-api-key.md)."
+                )
+                return False, warning
+
+            # Case 3: other non-OK responses (quota, region, generic 4xx/5xx, etc.)
+            if not resp.ok:
+                logger.warning(
+                    "OpenAI API key validation failed with status=%s, body_snippet=%s",
+                    resp.status_code,
+                    (resp.text or "")[:200],
+                )
+                warning = (
+                    "**Warning OpenAI:** Your **OpenAI API key** may be expired, out of quota, or the OpenAI service "
+                    "returned an error (status code {}). "
+                    "You may not be able to run an OpenAI-hosted model, and documents containing images "
+                    "or hard-to-parse content may not make it into your knowledge base.\n"
+                    "For help provisioning an OpenAI API key, please follow "
+                    "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/openai-api-key.md)."
+                ).format(resp.status_code)
+                return False, warning
+
+        except Exception as e:
+            # Case 4: network/SSL/timeouts/etc.
+            logger.warning("OpenAI API key validation encountered an exception: %s", e)
+            warning = (
+                "**Warning OpenAI:** Your **OpenAI API key** could not be validated from this environment "
+                "(network error, timeout, or similar). "
+                "You may not be able to run an OpenAI-hosted model, and documents containing images "
+                "or hard-to-parse content may not make it into your knowledge base.\n"
+                "For help provisioning an OpenAI API key, please follow "
+                "[these steps](https://github.com/Pris-mo/Open_Canvas_Pipeline/blob/main/docs/openai-api-key.md)."
+            )
+            return False, warning
+
+        # If we got here, the key looks usable enough
+        return True, None
+
     def _stream_process_lines(self, cmd: list[str], cwd: Path, env: dict[str, str]):
         """
         Yields lines from stdout/stderr while the process runs.
@@ -240,7 +401,6 @@ class Pipeline:
         name = self._safe_upload_name(chunks_root, md_path)
         content = md_path.read_bytes()
         return self.upload_file_from_bytes(name, content)
-
 
     def _url(self, path: str) -> str:
         # path should start with "/"
@@ -334,7 +494,6 @@ class Pipeline:
             )
             return retry_id, resp
 
-
     # ----------------------------
     # Knowledge flow
     # ----------------------------
@@ -364,7 +523,6 @@ class Pipeline:
         if not isinstance(data, dict):
             raise RuntimeError(f"upload_file returned unexpected payload: {data}")
         return data
-
 
     def add_file_to_knowledge(self, knowledge_id: str, file_id: str) -> Dict[str, Any]:
         payload = {"file_id": file_id}
@@ -456,8 +614,6 @@ class Pipeline:
 
             """.strip()
 
-
-
     # ----------------------------
     # Model flow
     # ----------------------------
@@ -490,11 +646,10 @@ class Pipeline:
                     "citations": "true",
                     "status_updates": "true",
                     "builtin_tools": "true"
-                    }, 
+                    },
             },
             "access_control": None,
         }
-
 
         # Some builds expect "knowledge" at top-level meta as an array of KB objects
         # Attach KB in the shape the UI expects.
@@ -511,8 +666,6 @@ class Pipeline:
 
             # This matches what your working model payload looks like (meta.knowledge = [{...}])
             payload["meta"]["knowledge"] = [kb_obj]
-
-
 
         resp = self._http("POST", "/api/v1/models/create", json=payload)
         data = self._require_ok(resp, "create_model")
@@ -562,7 +715,7 @@ class Pipeline:
             while True:
                 try:
                     line = next(gen)
-                    yield line + "\n"  # still dumping everything while debugging
+                    yield line + "\n"
                 except StopIteration as e:
                     rc = e.value if e.value is not None else 0
                     break
@@ -633,26 +786,27 @@ class Pipeline:
             "cmd": " ".join(cmd),
         }
 
-
     def _stream_provision(
         self,
         course_url: str,
         base_url: str,
         course_id: str,
         warnings: list[str],
+        course_name: Optional[str] = None,
     ):
+        # 🔔 Show any pre-flight warnings (e.g., OpenAI key issues) *before* we do anything heavy.
+        if warnings:
+            yield "⚠️ Warnings detected before provisioning:\n"
+            for w in warnings:
+                # Handle multi-line warnings nicely
+                for line in str(w).splitlines():
+                    if line.strip():
+                        yield f"- {line}\n"
+            yield "\n[Starting] Running orchestrator for the course...\n\n"
+
         # 6) Orchestrator streaming
         orch_rc = None
 
-        for item in self.run_orchestrator_stream(course_url):
-            if isinstance(item, dict) and item.get("type") == "final":
-                orch_rc = item.get("returncode", 2)
-            else:
-                item = str(item).strip()
-                if "::STEP::" in item:
-                    clean = item.replace("::STEP::", "- ", 1)
-                    yield clean + "\n"
-            
         for item in self.run_orchestrator_stream(course_url):
             if isinstance(item, dict) and item.get("type") == "final":
                 orch_rc = item.get("returncode", 2)
@@ -661,16 +815,14 @@ class Pipeline:
 
                 if self.valves.DEBUG:
                     # Stream all orchestrator output
-                    # (you can keep the ::STEP:: tag, or strip it if you prefer)
                     clean = line.replace("::STEP::", "- ", 1)
-                    yield clean + "\n"            
+                    yield clean + "\n"
                 else:
-                     # Only show STEP lines
+                    # Only show STEP lines
                     if "::STEP::" in line:
                         clean = line.replace("::STEP::", "- ", 1)
                         yield clean + "\n"
-                
-                
+
         if orch_rc != 0:
             yield "❌ Orchestrator failed"
             return
@@ -678,7 +830,7 @@ class Pipeline:
             yield "❌ Orchestrator ended without final status"
             return
 
-        # ✅ NEW: status message once the orchestrator has finished
+        # ✅ Status message once the orchestrator has finished
         yield "\n[Uploading] Now uploading files and creating the model\n"
 
         u = urlparse(course_url)
@@ -686,8 +838,10 @@ class Pipeline:
         host_slug = _slug(host)
         course_slug = _slug(course_id)
 
-        # Try to get a human-readable course name from Canvas
-        course_name = self._fetch_canvas_course_name(base_url, course_id)
+        # Try to get a human-readable course name from Canvas if we don't already have one
+        if not course_name:
+            course_name = self._fetch_canvas_course_name(base_url, course_id)
+
         if course_name:
             display_name = f"Canvas: {course_name}"
         else:
@@ -773,19 +927,11 @@ class Pipeline:
         warn_text = ("\n\n⚠️ Warnings:\n- " + "\n- ".join(warnings)) if warnings else ""
 
         yield (
-            "Provisioning complete\n\n"
-            f"- Input course_url: `{course_url}`\n"
-            f"- Parsed: base=`{base_url}`, course_id=`{course_id}`\n"
-            f"- Orchestrator: ✅ success\n"
-            f"- Knowledge Base: `{kb_name}` (id={kb_id})\n"
+            "✅ Success Provisioning complete\n\n"
+            f"- Knowledge Base Created at: `{kb_name}` (id={kb_id})\n"
             f"- Uploaded chunk files: {len(uploaded_file_ids)}\n"
-            f"- Model created: `{created_id}` (base={self.valves.BASE_MODEL_ID})\n\n"
-            "Notes:\n"
-            "• OpenWebUI indexes files asynchronously; this pipeline does not wait for processing.\n"
-            "• If the KB doesn’t show as attached in the model editor, you can manually attach it once in the UI.\n"
-            f"• Raw model create response (truncated): {str(created_model)[:400]}{warn_text}"
+            f"- Model created at: `{created_id}` (base={self.valves.BASE_MODEL_ID})\n\n"
         )
-
 
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
@@ -804,12 +950,7 @@ class Pipeline:
         ):
             return "Ignored background title/tags request."
 
-        if not self.valves.OPENWEBUI_API_KEY:
-            return "Missing OPENWEBUI_API_KEY (set it as a valve or env var)."
-
         warnings: list[str] = []
-        if not self.valves.CANVAS_API_KEY:
-            warnings.append("CANVAS_API_KEY is not set (Canvas ingest not enabled yet).")
 
         m = re.match(r"^\s*/?provision\s+(.+?)\s*$", user_message or "", flags=re.I)
         if not m:
@@ -826,8 +967,44 @@ class Pipeline:
 
         logger.info("User input course_url=%s (base=%s course_id=%s)", course_url, base_url, course_id)
 
+        # ----------------------------
+        # NEW: Key validation
+        # ----------------------------
+        errors: list[str] = []
+        course_name: Optional[str] = None
+
+        # 1) OpenWebUI key (hard stop on failure)
+        openweb_ok, openweb_err = self._validate_openwebui_key()
+        if not openweb_ok and openweb_err:
+            errors.append(openweb_err)
+
+        # 2) Canvas key (hard stop on failure; also fetch course name)
+        canvas_ok, canvas_err, course_name = self._validate_canvas_key(base_url, course_id, course_url)
+        if not canvas_ok and canvas_err:
+            errors.append(canvas_err)
+
+        # 3) OpenAI key (soft warning; do NOT block provisioning)
+        openai_ok, openai_warning = self._validate_openai_key()
+        if not openai_ok and openai_warning:
+            warnings.append(openai_warning)
+
+        # If any hard-stop errors occurred, report *all* of them, plus any warnings, and do not run.
+        if errors:
+            msg_lines: list[str] = [
+                "The following problems need to be fixed before provisioning can run:",
+                "",
+            ]
+            msg_lines.extend(f"- {e}" for e in errors)
+
+            if warnings:
+                msg_lines.append("")
+                msg_lines.append("Warnings:")
+                msg_lines.extend(f"- {w}" for w in warnings)
+
+            return "\n".join(msg_lines)
+
+        logger.info("All required keys validated successfully for course_url=%s", course_url)
+
         # 👉 IMPORTANT: return a generator *object* here.
         # OpenWebUI will treat this as a streaming pipeline.
-        return self._stream_provision(course_url, base_url, course_id, warnings)
-
-  
+        return self._stream_provision(course_url, base_url, course_id, warnings, course_name)
