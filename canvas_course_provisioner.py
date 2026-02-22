@@ -15,6 +15,8 @@ import logging
 import re
 from urllib.parse import urlparse
 import sys
+import time
+import random
 
 import requests
 from pydantic import BaseModel, Field
@@ -32,9 +34,12 @@ PIPELINE_ROOT = Path(__file__).resolve().parent
 ORCH_RUNS_ROOT_DEFAULT = str(PIPELINE_ROOT / "runs")  # e.g. /app/pipelines/Open_Canvas_Pipeline/runs
 ORCH_DEPTH_LIMIT_DEFAULT = 10
 # How many files to upload in parallel to Open WebUI
-UPLOAD_WORKERS_DEFAULT = int(os.getenv("UPLOAD_WORKERS", "12"))
+UPLOAD_WORKERS_DEFAULT = int(os.getenv("UPLOAD_WORKERS", "6"))
 FILE_PROCESS_DEFAULT = True
 FILE_PROCESS_IN_BACKGROUND_DEFAULT = True
+HTTP_READ_TIMEOUT_SECS = 180     
+HTTP_UPLOAD_READ_TIMEOUT_SECS = 300  
+HTTP_CONNECT_TIMEOUT_SECS = 10
 
 
 logger = logging.getLogger("canvas_course_provisioner")
@@ -157,6 +162,31 @@ class Pipeline:
         rel = re.sub(r"[^a-zA-Z0-9/_\.\-]+", "_", rel)
         return rel.replace("/", "__")  # "unit1/chunk_001.md" -> "unit1__chunk_001.md"
 
+    def _with_retries(self, fn, *, attempts: int = 5, base_delay: float = 1.0, max_delay: float = 20.0):
+        if attempts < 1:
+            raise ValueError("attempts must be >= 1")
+
+        for i in range(attempts):
+            try:
+                return fn()
+            except Exception as e:
+                s = str(e).lower()
+
+                transient = any(k in s for k in (
+                    "read timed out", "timeout", "502", "503", "504",
+                    "connection reset", "temporarily unavailable",
+                ))
+
+                # If it's not transient, or we're out of attempts, raise the real exception
+                if (not transient) or (i == attempts - 1):
+                    raise
+
+                delay = min(max_delay, base_delay * (2 ** i)) + random.random()
+                time.sleep(delay)
+
+        # Should be unreachable because the last iteration raises
+        raise RuntimeError("Retry loop exited unexpectedly")
+
     def _upload_and_attach_one(
         self,
         kb_id: str,
@@ -167,12 +197,15 @@ class Pipeline:
         Returns: (md_path_str, file_id_or_none, error_or_none)
         """
         try:
-            up = self.upload_markdown_file(chunks_root, md_path)
-            file_id = up.get("id") or (up.get("file") or {}).get("id")
-            if not file_id:
-                raise RuntimeError(f"Unexpected upload payload: {up}")
+            def do():
+                up = self.upload_markdown_file(chunks_root, md_path)
+                file_id = up.get("id") or (up.get("file") or {}).get("id")
+                if not file_id:
+                    raise RuntimeError(f"Unexpected upload payload: {up}")
+                self.add_file_to_knowledge(kb_id, file_id)
+                return file_id
 
-            self.add_file_to_knowledge(kb_id, file_id)
+            file_id = self._with_retries(do, attempts=5)
             return (str(md_path), file_id, None)
 
         except Exception as e:
@@ -411,10 +444,12 @@ class Pipeline:
         headers = kwargs.pop("headers", {})
         merged = {**self._headers(), **headers}
 
-        timeout = kwargs.pop("timeout", self.valves.HTTP_TIMEOUT_SECS)
+        timeout = kwargs.pop(
+            "timeout",
+            (HTTP_CONNECT_TIMEOUT_SECS, HTTP_READ_TIMEOUT_SECS),  # ✅ globals
+        )
 
-        resp = requests.request(method, url, headers=merged, timeout=timeout, **kwargs)
-        return resp
+        return requests.request(method, url, headers=merged, timeout=timeout, **kwargs)
 
     def _require_ok(self, resp: requests.Response, context: str) -> Any:
         """
@@ -518,7 +553,13 @@ class Pipeline:
             "process_in_background": "true" if FILE_PROCESS_IN_BACKGROUND_DEFAULT else "false",
         }
 
-        resp = self._http("POST", "/api/v1/files/", files=files, params=params)
+        resp = self._http(
+            "POST",
+            "/api/v1/files/",
+            files=files,
+            params=params,
+            timeout=(HTTP_CONNECT_TIMEOUT_SECS, HTTP_UPLOAD_READ_TIMEOUT_SECS),  # ✅ globals
+        )
         data = self._require_ok(resp, "upload_file")
         if not isinstance(data, dict):
             raise RuntimeError(f"upload_file returned unexpected payload: {data}")
@@ -881,6 +922,8 @@ class Pipeline:
                 "• Check the orchestrator logs for where chunks were written"
             )
             return
+        else:
+            yield f"Found {len(md_files)} markdown files under:\n  {chunks_dir}\n"
 
         uploaded_file_ids: List[str] = []
         upload_failures: List[str] = []
@@ -902,6 +945,17 @@ class Pipeline:
                         upload_failures.append(f"{path_str} -> {err or 'upload/add returned no file id'}")
                 except Exception as e:
                     upload_failures.append(f"{p} -> {e}")
+        yield (
+            f"\nUpload summary:\n"
+            f"- Markdown files discovered: {len(md_files)}\n"
+            f"- Files uploaded successfully: {len(uploaded_file_ids)}\n"
+            f"- Files that failed to upload: {len(upload_failures)}\n"
+        )
+
+        if upload_failures:
+            yield "Example upload failures (first 5):\n"
+            for fail in upload_failures[:5]:
+                yield f"- {fail}\n"
 
         if not uploaded_file_ids:
             yield (
@@ -930,7 +984,8 @@ class Pipeline:
             "✅ Success Provisioning complete\n\n"
             f"- Knowledge Base Created at: `{kb_name}` (id={kb_id})\n"
             f"- Uploaded chunk files: {len(uploaded_file_ids)}\n"
-            f"- Model created at: `{created_id}` (base={self.valves.BASE_MODEL_ID})\n\n"
+            f"- Model created at: `{created_id}` (base={self.valves.BASE_MODEL_ID})\n"
+            f"{warn_text}\n\n"
         )
 
 
