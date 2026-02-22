@@ -36,6 +36,17 @@ When you’re done setting this up, you’ll be able to:
 
 ---
 
+## Demo videos
+
+- **Setup and provisioning walkthrough**  
+  [Setup And Provisioning](https://drive.google.com/file/d/1qgIxMtBJXe3Q01tgc28Yeo0yn_WiMf1a/view?usp=drive_link)  
+  Shows how to configure the environment and run the Canvas Course Provisioner pipeline.
+
+- **Usage walkthrough**  
+  [Usage Demo](https://drive.google.com/file/d/15Q398WefwLRgVtqwKt-2tKJ_Z0A0iy9C/view?usp=drive_link)  
+  Shows how to chat with the course assistant in Open WebUI after provisioning is complete.
+
+---
 
 ## Quickstart
 
